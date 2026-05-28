@@ -11,8 +11,8 @@ from typing import Any
 
 from . import __version__
 from .config import DEFAULT_CONFIG_PATH, Config, load_config
-from .heartbeat import Heartbeat, Status
-from .mqtt_loop import FrameDispatcher, MessageHandler, make_mqtt_loop
+from .heartbeat import Heartbeat, Status, status_topic
+from .mqtt_loop import FrameDispatcher, MessageHandler, frame_topic, make_mqtt_loop
 from .paint import auto_panel, model_name, paint, panel_resolution, stripe_test_image
 
 log = logging.getLogger(__name__)
@@ -59,7 +59,12 @@ def _do_run(config: Config) -> int:
     name = model_name(panel)
     log.info("detected panel %s (%dx%d)", name, panel_size[0], panel_size[1])
 
-    status = Status(panel=name)
+    device_id = config.mqtt.device_id
+    frame_t = frame_topic(device_id)
+    status_t = status_topic(device_id)
+    log.info("device_id=%s frame_topic=%s status_topic=%s", device_id, frame_t, status_t)
+
+    status = Status(panel=name, panel_w=panel_size[0], panel_h=panel_size[1])
 
     def paint_fn(img: Any, saturation: float) -> None:
         paint(panel, img, saturation)
@@ -84,7 +89,7 @@ def _do_run(config: Config) -> int:
                 return None
             return client.publish(topic, payload, qos=qos, retain=retain)
 
-    heartbeat = Heartbeat(status=status, publisher=_ClientPublisher())
+    heartbeat = Heartbeat(status=status, publisher=_ClientPublisher(), topic=status_t)
     dispatcher = FrameDispatcher(
         config=config,
         paint_fn=paint_fn,
@@ -92,8 +97,12 @@ def _do_run(config: Config) -> int:
         status=status,
         heartbeat=heartbeat,
     )
-    handler = MessageHandler(dispatcher=dispatcher, status=status, heartbeat=heartbeat)
-    client = make_mqtt_loop(config=config, handler=handler)
+    handler = MessageHandler(
+        dispatcher=dispatcher, status=status, heartbeat=heartbeat, frame_topic=frame_t
+    )
+    client = make_mqtt_loop(
+        config=config, handler=handler, frame_topic=frame_t, status_topic=status_t
+    )
     client_holder["client"] = client
 
     shutdown = threading.Event()

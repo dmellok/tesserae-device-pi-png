@@ -19,7 +19,6 @@ from PIL.Image import Image
 from .config import Config
 from .heartbeat import (
     OFFLINE_WILL_PAYLOAD,
-    STATUS_TOPIC,
     Heartbeat,
     Status,
 )
@@ -27,9 +26,12 @@ from .transforms import VALID_SCALES, apply_transforms
 
 log = logging.getLogger(__name__)
 
-FRAME_TOPIC = "tesserae/pi/frame/png"
 RECONNECT_BACKOFF_MIN_S = 1.0
 RECONNECT_BACKOFF_MAX_S = 60.0
+
+
+def frame_topic(device_id: str) -> str:
+    return f"tesserae/{device_id}/frame/png"
 
 # The contract says "/renders/<64-hex-digest>.png" but we accept any
 # reasonable hex suffix length — older Tesserae builds used 8-char prefixes
@@ -98,7 +100,7 @@ def _parse_saturation(value: Any) -> float:
 
 
 def parse_frame_payload(raw: bytes) -> FrameRequest:
-    """Parse the JSON announcement from FRAME_TOPIC. Raises on malformed input.
+    """Parse the JSON announcement from the frame topic. Raises on bad input.
 
     All five contract fields (url/rotate/scale/bg/saturation) are required
     present per the spec — we do not apply our own defaults that would
@@ -325,13 +327,15 @@ class MessageHandler:
         dispatcher: _SubmitDispatcher,
         status: Status,
         heartbeat: Heartbeat,
+        frame_topic: str,
     ) -> None:
         self._dispatcher = dispatcher
         self._status = status
         self._heartbeat = heartbeat
+        self._frame_topic = frame_topic
 
     def handle(self, topic: str, payload: bytes) -> None:
-        if topic != FRAME_TOPIC:
+        if topic != self._frame_topic:
             log.warning("ignored message on unexpected topic %r", topic)
             return
         try:
@@ -358,13 +362,15 @@ def _build_paho_client(client_id: str) -> Any:
 def make_mqtt_loop(
     config: Config,
     handler: MessageHandler,
+    frame_topic: str,
+    status_topic: str,
     client_factory: Callable[[str], Any] = _build_paho_client,
 ) -> Any:
     """Wire up a paho client with LWT, callbacks, and reconnect tuning."""
     client = client_factory(config.mqtt.client_id)
     if config.mqtt.username:
         client.username_pw_set(config.mqtt.username, config.mqtt.password or None)
-    client.will_set(STATUS_TOPIC, OFFLINE_WILL_PAYLOAD, qos=1, retain=True)
+    client.will_set(status_topic, OFFLINE_WILL_PAYLOAD, qos=1, retain=True)
     client.reconnect_delay_set(RECONNECT_BACKOFF_MIN_S, RECONNECT_BACKOFF_MAX_S)
 
     def on_connect(
@@ -375,7 +381,7 @@ def make_mqtt_loop(
         properties: Any = None,
     ) -> None:
         log.info("MQTT connected reason_code=%s", reason_code)
-        client_.subscribe(FRAME_TOPIC, qos=1)
+        client_.subscribe(frame_topic, qos=1)
 
     def on_disconnect(
         client_: Any,
@@ -396,7 +402,6 @@ def make_mqtt_loop(
 
 
 __all__ = [
-    "FRAME_TOPIC",
     "RECONNECT_BACKOFF_MAX_S",
     "RECONNECT_BACKOFF_MIN_S",
     "Downloader",
@@ -406,6 +411,7 @@ __all__ = [
     "MqttClientLike",
     "PaintFn",
     "decode_png",
+    "frame_topic",
     "http_download",
     "make_mqtt_loop",
     "parse_frame_payload",

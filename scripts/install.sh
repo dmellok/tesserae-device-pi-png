@@ -43,8 +43,8 @@ usage: $0 [options]
                       the gpio/spi groups were just added)
   --skip-apt          skip apt-get update + install
   --non-interactive   never prompt — write a default config if none exists
-  --reconfigure       prompt for MQTT values even if a config exists
-                      (will overwrite the existing file)
+  --reconfigure       prompt for device id + MQTT values even if a config
+                      exists (overwrites the existing file, including device_id)
   --bookworm          also pip install rpi-lgpio (required on Pi 5 / Bookworm,
                       where RPi.GPIO doesn't work). Harmless on older boards.
   --user USER         user the systemd unit runs as (default: \$USER)
@@ -192,6 +192,17 @@ collect_config_via_prompts() {
     echo "==> MQTT configuration (panel auto-detects via HAT EEPROM — no prompt)"
     echo "    Press Enter at any prompt to accept the default in brackets."
     echo
+    echo "    A device id identifies this Pi to the Tesserae server."
+    echo "    Use 'pi_png' if this is your only PNG-protocol Pi display;"
+    echo "    pick something like 'pi_lounge' if you're running more"
+    echo "    than one (each must have its own id)."
+    prompt_default device_id       "Device id"          "pi_png"
+    # basic client-side validation; the parser also enforces this
+    if ! [[ "$device_id" =~ ^[a-z][a-z0-9_-]{1,31}$ ]]; then
+        echo "    invalid device id; falling back to 'pi_png'" >&2
+        device_id="pi_png"
+    fi
+    echo
     prompt_default mqtt_host       "MQTT broker host"   "192.168.1.10"
     prompt_default mqtt_port       "MQTT broker port"   "1883"
     prompt_default mqtt_username   "MQTT username (blank for anonymous)" ""
@@ -213,6 +224,7 @@ write_config() {
         T_MQTT_USERNAME="${mqtt_username:-}" \
         T_MQTT_PASSWORD="${mqtt_password:-}" \
         T_MQTT_CLIENT_ID="${mqtt_client_id:-}" \
+        T_DEVICE_ID="${device_id:-}" \
         T_OVERWRITE="$1" \
         "$VENV_DIR/bin/python" -m tesserae_pi_png_client.bootstrap_config
 }

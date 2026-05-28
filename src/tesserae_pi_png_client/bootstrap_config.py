@@ -13,6 +13,7 @@ Env vars (all optional — unset means "use the default"):
     T_MQTT_USERNAME
     T_MQTT_PASSWORD
     T_MQTT_CLIENT_ID
+    T_DEVICE_ID          MQTT topic prefix (default: pi_png)
     T_OVERWRITE          "1" to overwrite an existing file; otherwise abort
 
 (Notably no T_PANEL_MODEL — this client auto-detects via the HAT EEPROM.)
@@ -56,6 +57,7 @@ def main() -> int:
         ("T_MQTT_USERNAME", "mqtt_username"),
         ("T_MQTT_PASSWORD", "mqtt_password"),
         ("T_MQTT_CLIENT_ID", "mqtt_client_id"),
+        ("T_DEVICE_ID", "device_id"),
     ]:
         val = _env_str(env_name)
         if val is not None:

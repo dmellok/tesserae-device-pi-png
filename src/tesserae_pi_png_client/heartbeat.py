@@ -1,16 +1,48 @@
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import time
 from dataclasses import dataclass, field
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Protocol
 
-from . import __version__
-
-STATUS_TOPIC = "tesserae/pi/status"
 OFFLINE_WILL_PAYLOAD = json.dumps({"state": "offline"}).encode("utf-8")
 HEARTBEAT_INTERVAL_S = 60.0
+
+# Discovery: Tesserae watches tesserae/+/status and uses this to pre-fill the
+# device kind in its one-click register flow.
+CLIENT_KIND = "pi_png_client"
+
+
+def status_topic(device_id: str) -> str:
+    return f"tesserae/{device_id}/status"
+
+
+def _fw_version() -> str:
+    try:
+        return version("tesserae-pi-png-client")
+    except PackageNotFoundError:
+        return "0.0.0+unknown"
+
+
+def _primary_ip() -> str:
+    """Best-effort primary outbound IPv4. Blank if it can't be determined.
+
+    The UDP connect sends no packets — it just asks the kernel which local
+    address would route to a public host, which is the interface Tesserae
+    would reach this device on.
+    """
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return str(s.getsockname()[0])
+        finally:
+            s.close()
+    except OSError:
+        return ""
 
 
 class Publisher(Protocol):
@@ -27,6 +59,11 @@ class Status:
     last_digest: str | None = None
     panel: str = "unknown"
     started_at: float = field(default_factory=time.time)
+    kind: str = CLIENT_KIND
+    panel_w: int = 0
+    panel_h: int = 0
+    fw_version: str = field(default_factory=_fw_version)
+    ip: str = field(default_factory=_primary_ip)
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -35,8 +72,12 @@ class Status:
             "last_error": self.last_error,
             "last_digest": self.last_digest,
             "uptime_s": time.time() - self.started_at,
-            "fw_version": __version__,
+            "fw_version": self.fw_version,
             "panel": self.panel,
+            "kind": self.kind,
+            "panel_w": self.panel_w,
+            "panel_h": self.panel_h,
+            "ip": self.ip,
         }
 
     def to_json(self) -> bytes:
@@ -57,7 +98,8 @@ class Heartbeat:
         status: Status,
         publisher: Publisher,
         interval: float = HEARTBEAT_INTERVAL_S,
-        topic: str = STATUS_TOPIC,
+        *,
+        topic: str,
     ) -> None:
         self._status = status
         self._publisher = publisher
@@ -118,11 +160,12 @@ def status_summary(status: Status) -> str:
 
 
 __all__ = [
+    "CLIENT_KIND",
     "HEARTBEAT_INTERVAL_S",
     "OFFLINE_WILL_PAYLOAD",
-    "STATUS_TOPIC",
     "Heartbeat",
     "Publisher",
     "Status",
     "status_summary",
+    "status_topic",
 ]

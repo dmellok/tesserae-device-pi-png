@@ -21,6 +21,7 @@ def test_default_toml_parses() -> None:
     assert cfg.mqtt.username == ""
     assert cfg.mqtt.password == ""
     assert cfg.mqtt.client_id == "pi-impression-png-1"
+    assert cfg.mqtt.device_id == "pi_png"
     assert cfg.mqtt.keepalive == 60
     assert cfg.http.download_timeout_s == 30
     assert cfg.http.max_frame_bytes == 16_000_000
@@ -128,4 +129,36 @@ def test_render_escapes_backslash_in_string_value() -> None:
 def test_bool_value_for_int_field_rejected() -> None:
     bad = DEFAULT_TOML.replace("port = 1883", "port = true")
     with pytest.raises(ValueError, match="port"):
+        parse_toml(bad)
+
+
+def test_device_id_defaults_when_missing() -> None:
+    # An older config.toml predating device_id should parse with the new default.
+    without = DEFAULT_TOML.replace('device_id = "pi_png"  # MQTT topic prefix\n', "")
+    assert "device_id" not in without
+    cfg = parse_toml(without)
+    assert cfg.mqtt.device_id == "pi_png"
+
+
+def test_device_id_override_round_trips() -> None:
+    body = render_config_toml(device_id="pi_lounge")
+    cfg = parse_toml(body)
+    assert cfg.mqtt.device_id == "pi_lounge"
+
+
+def test_invalid_device_id_uppercase_rejected() -> None:
+    bad = DEFAULT_TOML.replace('device_id = "pi_png"', 'device_id = "Pi_PNG"')
+    with pytest.raises(ValueError, match="device_id"):
+        parse_toml(bad)
+
+
+def test_invalid_device_id_leading_digit_rejected() -> None:
+    bad = DEFAULT_TOML.replace('device_id = "pi_png"', 'device_id = "1pi"')
+    with pytest.raises(ValueError, match="device_id"):
+        parse_toml(bad)
+
+
+def test_invalid_device_id_too_short_rejected() -> None:
+    bad = DEFAULT_TOML.replace('device_id = "pi_png"', 'device_id = "p"')
+    with pytest.raises(ValueError, match="device_id"):
         parse_toml(bad)

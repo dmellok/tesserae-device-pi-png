@@ -14,16 +14,20 @@ from tesserae_pi_png_client.config import (
     LoggingConfig,
     MqttConfig,
 )
-from tesserae_pi_png_client.heartbeat import Heartbeat, Status
+from tesserae_pi_png_client.heartbeat import Heartbeat, Status, status_topic
 from tesserae_pi_png_client.mqtt_loop import (
-    FRAME_TOPIC,
     FrameDispatcher,
     FrameRequest,
     MessageHandler,
     decode_png,
+    frame_topic,
     make_mqtt_loop,
     parse_frame_payload,
 )
+
+DEVICE_ID = "pi_png"
+FRAME_TOPIC = frame_topic(DEVICE_ID)
+STATUS_TOPIC = status_topic(DEVICE_ID)
 
 
 def _config() -> Config:
@@ -261,12 +265,13 @@ def test_decode_png_raises_on_garbage() -> None:
 def _handler_pair() -> tuple[MessageHandler, CapturingDispatcher, Status, FakePublisher]:
     status = Status(panel="inky_impression_7_3")
     publisher = FakePublisher()
-    heartbeat = Heartbeat(status=status, publisher=publisher)
+    heartbeat = Heartbeat(status=status, publisher=publisher, topic=STATUS_TOPIC)
     dispatcher = CapturingDispatcher()
     handler = MessageHandler(
         dispatcher=dispatcher,
         status=status,
         heartbeat=heartbeat,
+        frame_topic=FRAME_TOPIC,
     )
     return handler, dispatcher, status, publisher
 
@@ -321,7 +326,7 @@ def test_dispatcher_paints_valid_png() -> None:
         paint_calls.append((img, saturation))
 
     status = Status(panel="inky_impression_7_3")
-    heartbeat = Heartbeat(status=status, publisher=FakePublisher())
+    heartbeat = Heartbeat(status=status, publisher=FakePublisher(), topic=STATUS_TOPIC)
     dispatcher = FrameDispatcher(
         config=cfg,
         paint_fn=fake_paint,
@@ -362,7 +367,7 @@ def test_dispatcher_records_download_failure() -> None:
         paint_calls.append((img, saturation))
 
     status = Status(panel="inky_impression_7_3")
-    heartbeat = Heartbeat(status=status, publisher=FakePublisher())
+    heartbeat = Heartbeat(status=status, publisher=FakePublisher(), topic=STATUS_TOPIC)
     dispatcher = FrameDispatcher(
         config=cfg,
         paint_fn=fake_paint,
@@ -398,7 +403,7 @@ def test_dispatcher_records_decode_failure() -> None:
         paint_calls.append((img, saturation))
 
     status = Status(panel="inky_impression_7_3")
-    heartbeat = Heartbeat(status=status, publisher=FakePublisher())
+    heartbeat = Heartbeat(status=status, publisher=FakePublisher(), topic=STATUS_TOPIC)
     dispatcher = FrameDispatcher(
         config=cfg,
         paint_fn=fake_paint,
@@ -435,7 +440,7 @@ def test_dispatcher_skips_duplicate_digest() -> None:
         pass
 
     status = Status(panel="inky_impression_7_3")
-    heartbeat = Heartbeat(status=status, publisher=FakePublisher())
+    heartbeat = Heartbeat(status=status, publisher=FakePublisher(), topic=STATUS_TOPIC)
     dispatcher = FrameDispatcher(
         config=cfg,
         paint_fn=fake_paint,
@@ -476,7 +481,7 @@ def test_dispatcher_applies_rotate_and_scale_from_payload() -> None:
         painted.append(img)
 
     status = Status(panel="test")
-    heartbeat = Heartbeat(status=status, publisher=FakePublisher())
+    heartbeat = Heartbeat(status=status, publisher=FakePublisher(), topic=STATUS_TOPIC)
     dispatcher = FrameDispatcher(
         config=cfg,
         paint_fn=fake_paint,
@@ -531,18 +536,25 @@ class FakeMqttClient:
 def test_make_mqtt_loop_sets_lwt_and_backoff() -> None:
     cfg = _config()
     status = Status(panel="test")
-    heartbeat = Heartbeat(status=status, publisher=FakePublisher())
+    heartbeat = Heartbeat(status=status, publisher=FakePublisher(), topic=STATUS_TOPIC)
     handler = MessageHandler(
         dispatcher=CapturingDispatcher(),
         status=status,
         heartbeat=heartbeat,
+        frame_topic=FRAME_TOPIC,
     )
     fake_client = FakeMqttClient("cid")
-    client = make_mqtt_loop(cfg, handler, client_factory=lambda cid: fake_client)
+    client = make_mqtt_loop(
+        cfg,
+        handler,
+        frame_topic=FRAME_TOPIC,
+        status_topic=STATUS_TOPIC,
+        client_factory=lambda cid: fake_client,
+    )
     assert client is fake_client
     assert fake_client.will is not None
     topic, payload, qos, retain = fake_client.will
-    assert topic == "tesserae/pi/status"
+    assert topic == STATUS_TOPIC
     assert qos == 1 and retain is True
     assert json.loads(payload.decode())["state"] == "offline"
     assert fake_client.backoff == (1.0, 60.0)
@@ -565,26 +577,40 @@ def test_make_mqtt_loop_passes_credentials_when_set() -> None:
         logging=LoggingConfig(level="INFO"),
     )
     status = Status(panel="test")
-    heartbeat = Heartbeat(status=status, publisher=FakePublisher())
+    heartbeat = Heartbeat(status=status, publisher=FakePublisher(), topic=STATUS_TOPIC)
     handler = MessageHandler(
         dispatcher=CapturingDispatcher(),
         status=status,
         heartbeat=heartbeat,
+        frame_topic=FRAME_TOPIC,
     )
     fake_client = FakeMqttClient("cid")
-    make_mqtt_loop(cfg, handler, client_factory=lambda cid: fake_client)
+    make_mqtt_loop(
+        cfg,
+        handler,
+        frame_topic=FRAME_TOPIC,
+        status_topic=STATUS_TOPIC,
+        client_factory=lambda cid: fake_client,
+    )
     assert fake_client.username == ("alice", "hunter2")
 
 
 def test_make_mqtt_loop_omits_credentials_when_unset() -> None:
     cfg = _config()
     status = Status(panel="test")
-    heartbeat = Heartbeat(status=status, publisher=FakePublisher())
+    heartbeat = Heartbeat(status=status, publisher=FakePublisher(), topic=STATUS_TOPIC)
     handler = MessageHandler(
         dispatcher=CapturingDispatcher(),
         status=status,
         heartbeat=heartbeat,
+        frame_topic=FRAME_TOPIC,
     )
     fake_client = FakeMqttClient("cid")
-    make_mqtt_loop(cfg, handler, client_factory=lambda cid: fake_client)
+    make_mqtt_loop(
+        cfg,
+        handler,
+        frame_topic=FRAME_TOPIC,
+        status_topic=STATUS_TOPIC,
+        client_factory=lambda cid: fake_client,
+    )
     assert fake_client.username is None

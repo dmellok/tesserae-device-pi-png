@@ -45,7 +45,7 @@ It does, idempotently:
 3. `usermod -aG gpio,spi $USER` for HAT access (needs a re-login to take effect)
 4. Create `.venv` in the repo dir
 5. `pip install -e .` — pulls `inky[rpi]`, `paho-mqtt`, `Pillow`
-6. Prompt for MQTT host/port/user/pass/client-id → write
+6. Prompt for device id + MQTT host/port/user/pass/client-id → write
    `~/.config/tesserae-pi-png-client/config.toml` (skipped if it exists, unless
    `--reconfigure`)
 7. Symlink `.venv/bin/tesserae-pi-png-client` to `/usr/local/bin/`
@@ -106,6 +106,7 @@ port = 1883
 username = ""
 password = ""
 client_id = "pi-impression-png-1"
+device_id = "pi_png"  # MQTT topic prefix
 keepalive = 60
 
 [http]
@@ -116,9 +117,25 @@ max_frame_bytes = 16_000_000
 level = "INFO"
 ```
 
+`device_id` sets the MQTT topic prefix this client subscribes and publishes
+on (see *MQTT contract* below), and is the id Tesserae identifies the device
+by. The default `pi_png` matches Tesserae's built-in `pi_png_client` device
+kind. Give each Pi its own id (`pi_lounge`, `pi_kitchen`, …) if you run more
+than one. It must be lowercase, 2–32 chars, and start with a letter
+(`^[a-z][a-z0-9_-]{1,31}$`).
+
 Note: there is no `[panel]` section — the panel is auto-detected from the
 HAT EEPROM. If detection fails the daemon refuses to start (see
 troubleshooting).
+
+> **Upgrading from an older version?** This client used to hardcode the
+> `tesserae/pi/...` topic prefix. It now defaults to `tesserae/pi_png/...`.
+> **This is a breaking topic change**: an existing `config.toml` with no
+> `device_id` parses with the new `pi_png` default, so the client moves to
+> the new topics. Either register a `pi_png` device in Tesserae
+> (Settings → Devices — the built-in `pi_png_client` kind), or, to keep the
+> legacy prefix, set `device_id = "pi"` by hand and add a matching device in
+> Tesserae.
 
 ### Install as a service (if you used the manual path)
 
@@ -135,9 +152,12 @@ The unit runs as your user with `gpio` + `spi` group membership.
 
 ## MQTT contract
 
+All topics are prefixed with the configured `device_id` (default `pi_png`),
+i.e. `tesserae/<device_id>/...`. The examples below use the default.
+
 ### Subscribe
 
-Topic: `tesserae/pi/frame/png` (QoS 1, not retained)
+Topic: `tesserae/<device_id>/frame/png` (QoS 1, not retained)
 
 Payload (all five fields required):
 
@@ -161,7 +181,7 @@ Payload (all five fields required):
 
 ### Publish
 
-Topic: `tesserae/pi/status` (QoS 1, retained, also the LWT topic)
+Topic: `tesserae/<device_id>/status` (QoS 1, retained, also the LWT topic)
 
 ```json
 {
@@ -171,12 +191,23 @@ Topic: `tesserae/pi/status` (QoS 1, retained, also the LWT topic)
   "last_digest": "3f7a91b2c4e5d6f8",
   "uptime_s": 3601,
   "fw_version": "0.1.0",
-  "panel": "inky_impression_13_3"
+  "panel": "inky_impression_13_3",
+  "kind": "pi_png_client",
+  "panel_w": 1600,
+  "panel_h": 1200,
+  "ip": "192.168.1.42"
 }
 ```
 
 `state` is one of `idle`, `rendering`, `error`, `offline` (LWT).
 Heartbeat: republished on every state change and at least every 60 s.
+
+The `kind` / `panel_w` / `panel_h` / `ip` keys feed Tesserae's device
+discovery: an unregistered `device_id` shows up under Settings → Devices as
+a "Discovered" row, and these keys pre-fill the device kind and panel size
+so registering it is one click. `panel_w` / `panel_h` are the post-rotation
+dimensions the panel actually paints. `ip` is best-effort and blank if the
+primary interface can't be determined.
 
 ---
 

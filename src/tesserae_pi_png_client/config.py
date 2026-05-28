@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "tesserae-pi-png-client" / "config.toml"
+
+DEFAULT_DEVICE_ID = "pi_png"
+
+# Matches the instance-id grammar the Tesserae server accepts: lowercase,
+# 2-32 chars, must start with a letter. The device_id becomes the MQTT topic
+# prefix, so it has to be broker-path-safe.
+_DEVICE_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{1,31}$")
 
 
 def _toml_str(value: str) -> str:
@@ -20,6 +28,7 @@ def render_config_toml(
     mqtt_username: str = "",
     mqtt_password: str = "",
     mqtt_client_id: str = "pi-impression-png-1",
+    device_id: str = DEFAULT_DEVICE_ID,
     mqtt_keepalive: int = 60,
     download_timeout_s: int = 30,
     max_frame_bytes: int = 16_000_000,
@@ -38,6 +47,7 @@ def render_config_toml(
         f"username = {_toml_str(mqtt_username)}\n"
         f"password = {_toml_str(mqtt_password)}\n"
         f"client_id = {_toml_str(mqtt_client_id)}\n"
+        f"device_id = {_toml_str(device_id)}  # MQTT topic prefix\n"
         f"keepalive = {mqtt_keepalive}\n"
         "\n"
         "[http]\n"
@@ -60,6 +70,7 @@ class MqttConfig:
     password: str
     client_id: str
     keepalive: int
+    device_id: str = DEFAULT_DEVICE_ID
 
 
 @dataclass(frozen=True)
@@ -101,6 +112,16 @@ def _parse(raw: dict[str, Any]) -> Config:
     mqtt_section = raw.get("mqtt", {})
     if not isinstance(mqtt_section, dict):
         raise ValueError("[mqtt] must be a table")
+    device_id = mqtt_section.get("device_id", DEFAULT_DEVICE_ID)
+    if not isinstance(device_id, str):
+        raise ValueError(
+            f"[mqtt].device_id must be str, got {type(device_id).__name__}"
+        )
+    if not _DEVICE_ID_RE.match(device_id):
+        raise ValueError(
+            f"[mqtt].device_id must match {_DEVICE_ID_RE.pattern!r} "
+            f"(lowercase, 2-32 chars, starts with a letter), got {device_id!r}"
+        )
     mqtt = MqttConfig(
         host=_require(mqtt_section, "host", str, "mqtt"),
         port=_require(mqtt_section, "port", int, "mqtt"),
@@ -108,6 +129,7 @@ def _parse(raw: dict[str, Any]) -> Config:
         password=mqtt_section.get("password", ""),
         client_id=_require(mqtt_section, "client_id", str, "mqtt"),
         keepalive=_require(mqtt_section, "keepalive", int, "mqtt"),
+        device_id=device_id,
     )
     if not 1 <= mqtt.port <= 65535:
         raise ValueError(f"[mqtt].port out of range: {mqtt.port}")
@@ -149,6 +171,7 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
 
 __all__ = [
     "DEFAULT_CONFIG_PATH",
+    "DEFAULT_DEVICE_ID",
     "DEFAULT_TOML",
     "Config",
     "HttpConfig",
