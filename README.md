@@ -298,4 +298,4 @@ src/tesserae_pi_png_client/
   main.py          # CLI entry point, signal handlers
 ```
 
-License: MIT.
+License: AGPL-3.0-or-later.
