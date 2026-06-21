@@ -13,6 +13,10 @@ authors = [{ name = "Tesserae" }]
 dependencies = [
     "paho-mqtt>=2.0,<3",
     "Pillow>=10,<12",
+    # transports/rest.py uses requests for HTTP polling. inky already pulls
+    # it transitively today, but list it explicitly so the dep tree doesn't
+    # depend on inky's chain to satisfy a module we import directly.
+    "requests>=2.31",
     # set_image() is the high-level entry point — no private-API dependency,
     # so we can take a range rather than the exact pin the bin client uses.
     "inky[rpi]>=2.0,<3",
@@ -49,16 +53,21 @@ module = [
     "tesserae_pi_png_client.transforms",
     "tesserae_pi_png_client.heartbeat",
     "tesserae_pi_png_client.mqtt_loop",
+    "tesserae_pi_png_client.transports.rest",
 ]
 strict = true
 
 [[tool.mypy.overrides]]
 # Hardware-touching paths — defaults.
-module = ["tesserae_pi_png_client.paint", "tesserae_pi_png_client.main"]
+module = [
+    "tesserae_pi_png_client.paint",
+    "tesserae_pi_png_client.main",
+    "tesserae_pi_png_client.transports.mqtt",
+]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["paho.*", "inky.*", "PIL.*"]
+module = ["paho.*", "inky.*", "PIL.*", "requests.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
