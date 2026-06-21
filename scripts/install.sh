@@ -123,6 +123,32 @@ prompt_secret() {
     printf -v "$__var" '%s' "$__input"
 }
 
+prompt_choice() {
+    # $1=var name, $2=question, $3=default index (1-based), $4..=choices
+    local __var="$1" __q="$2" __default_idx="$3"
+    shift 3
+    local __choices=("$@") __i __input
+    echo "${__q}"
+    for __i in "${!__choices[@]}"; do
+        local n=$((__i + 1))
+        if [[ "$n" == "$__default_idx" ]]; then
+            echo "    ${n}) ${__choices[$__i]}  [default]"
+        else
+            echo "    ${n}) ${__choices[$__i]}"
+        fi
+    done
+    read -r -p "choice [press Enter for default]: " __input
+    if [[ -z "$__input" ]]; then
+        __input="$__default_idx"
+    fi
+    if ! [[ "$__input" =~ ^[0-9]+$ ]] || \
+        (( __input < 1 || __input > ${#__choices[@]} )); then
+        echo "    invalid choice; using default" >&2
+        __input="$__default_idx"
+    fi
+    printf -v "$__var" '%s' "${__choices[$((__input - 1))]}"
+}
+
 echo "==> caching sudo credentials"
 sudo -v
 
@@ -218,29 +244,65 @@ fi
 # ----- 6. config -----
 collect_config_via_prompts() {
     echo
-    echo "==> MQTT configuration (panel auto-detects via HAT EEPROM — no prompt)"
+    echo "==> Tesserae client configuration (panel auto-detects via HAT EEPROM)"
     echo "    Press Enter at any prompt to accept the default in brackets."
     echo
+    echo "    Two transports are available:"
+    echo "      rest  poll the Tesserae server's REST API directly"
+    echo "            (default — simpler; just needs the server URL)"
+    echo "      mqtt  subscribe to an MQTT broker"
+    echo "            (existing setups — push-driven; needs a broker on the LAN)"
+    prompt_choice transport_mode "Transport" 1 \
+        "rest (poll the Tesserae server directly)" \
+        "mqtt (subscribe to a broker)"
+    # Strip the trailing "(...)" — keep just the mode id.
+    transport_mode="${transport_mode%% *}"
+    echo
+
     echo "    A device id identifies this Pi to the Tesserae server."
-    echo "    Use 'pi_png' if this is your only PNG-protocol Pi display;"
-    echo "    pick something like 'pi_lounge' if you're running more"
-    echo "    than one (each must have its own id)."
+    echo "    The default 'pi_png' matches the server's pi_png_client kind;"
+    echo "    pick something like 'pi_png_lounge' if you're running more"
+    echo "    than one .png Pi against the same server."
     prompt_default device_id       "Device id"          "pi_png"
-    # basic client-side validation; the parser also enforces this
+    # Client-side sanity check; the parser also enforces this regex.
     if ! [[ "$device_id" =~ ^[a-z][a-z0-9_-]{1,31}$ ]]; then
         echo "    invalid device id; falling back to 'pi_png'" >&2
         device_id="pi_png"
     fi
-    echo
-    prompt_default mqtt_host       "MQTT broker host"   "192.168.1.10"
-    prompt_default mqtt_port       "MQTT broker port"   "1883"
-    prompt_default mqtt_username   "MQTT username (blank for anonymous)" ""
-    if [[ -n "$mqtt_username" ]]; then
-        prompt_secret mqtt_password "MQTT password"
-    else
+
+    if [[ "$transport_mode" == "rest" ]]; then
+        echo
+        echo "    REST mode — point at the Tesserae server's base URL."
+        prompt_default rest_server_url "Tesserae server URL" \
+            "http://tesserae.local:8765"
+        echo
+        echo "    A pairing code is OPTIONAL. Leave it blank and the daemon will"
+        echo "    appear in Settings -> Devices for one-click Register on first"
+        echo "    boot. Set one only if your admin requires explicit per-device"
+        echo "    approval before any instance is created server-side."
+        prompt_default rest_pairing_code \
+            "Pairing code (optional, blank to skip)" ""
+        # MQTT-broker fields stay empty; render_config_toml fills their defaults
+        # but they're inert when transport_mode = "rest".
+        mqtt_host=""
+        mqtt_port=""
+        mqtt_username=""
         mqtt_password=""
+        mqtt_client_id=""
+    else
+        echo
+        prompt_default mqtt_host       "MQTT broker host"   "192.168.1.10"
+        prompt_default mqtt_port       "MQTT broker port"   "1883"
+        prompt_default mqtt_username   "MQTT username (blank for anonymous)" ""
+        if [[ -n "$mqtt_username" ]]; then
+            prompt_secret mqtt_password "MQTT password"
+        else
+            mqtt_password=""
+        fi
+        prompt_default mqtt_client_id  "MQTT client id"     "pi-impression-png-1"
+        rest_server_url=""
+        rest_pairing_code=""
     fi
-    prompt_default mqtt_client_id  "MQTT client id"     "pi-impression-png-1"
     echo
 }
 
@@ -248,6 +310,9 @@ write_config() {
     # $1 = "1" to overwrite an existing file
     env \
         T_CONFIG_PATH="$CONFIG_PATH" \
+        T_TRANSPORT_MODE="${transport_mode:-}" \
+        T_REST_SERVER_URL="${rest_server_url:-}" \
+        T_REST_PAIRING_CODE="${rest_pairing_code:-}" \
         T_MQTT_HOST="${mqtt_host:-}" \
         T_MQTT_PORT="${mqtt_port:-}" \
         T_MQTT_USERNAME="${mqtt_username:-}" \

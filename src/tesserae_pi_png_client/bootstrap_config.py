@@ -8,12 +8,15 @@ pass validation — install.sh surfaces that and the user can re-run.
 Env vars (all optional — unset means "use the default"):
 
     T_CONFIG_PATH        target path (default: DEFAULT_CONFIG_PATH)
+    T_TRANSPORT_MODE     "rest" (default) | "mqtt"
+    T_REST_SERVER_URL    e.g. http://tesserae.local:8765 (rest mode)
+    T_REST_PAIRING_CODE  optional 6-digit code; blank to use the discover loop
     T_MQTT_HOST
     T_MQTT_PORT
     T_MQTT_USERNAME
     T_MQTT_PASSWORD
     T_MQTT_CLIENT_ID
-    T_DEVICE_ID          MQTT topic prefix (default: pi_png)
+    T_DEVICE_ID          device id (default: pi_png)
     T_OVERWRITE          "1" to overwrite an existing file; otherwise abort
 
 (Notably no T_PANEL_MODEL — this client auto-detects via the HAT EEPROM.)
@@ -53,6 +56,9 @@ def main() -> int:
 
     overrides: dict[str, str | int] = {}
     for env_name, kw in [
+        ("T_TRANSPORT_MODE", "transport_mode"),
+        ("T_REST_SERVER_URL", "rest_server_url"),
+        ("T_REST_PAIRING_CODE", "rest_pairing_code"),
         ("T_MQTT_HOST", "mqtt_host"),
         ("T_MQTT_USERNAME", "mqtt_username"),
         ("T_MQTT_PASSWORD", "mqtt_password"),
