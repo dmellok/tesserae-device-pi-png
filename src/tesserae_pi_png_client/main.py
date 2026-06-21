@@ -11,7 +11,7 @@ from typing import Any
 
 from . import __version__
 from .config import DEFAULT_CONFIG_PATH, Config, load_config
-from .heartbeat import Heartbeat, Status, status_topic
+from .heartbeat import Heartbeat, Status, _primary_ip, status_topic
 from .mqtt_loop import FrameDispatcher, MessageHandler, frame_topic, make_mqtt_loop
 from .paint import auto_panel, model_name, paint, panel_resolution, stripe_test_image
 
@@ -69,6 +69,8 @@ def _do_run(config: Config) -> int:
     log.info("device_id=%s frame_topic=%s status_topic=%s", device_id, frame_t, status_t)
 
     status = Status(panel=name, panel_w=panel_size[0], panel_h=panel_size[1])
+    # Resolved once at startup — neither value changes between heartbeats.
+    status.ip = _primary_ip()
 
     def paint_fn(img: Any, saturation: float) -> None:
         paint(panel, img, saturation)

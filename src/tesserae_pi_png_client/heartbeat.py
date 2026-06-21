@@ -13,7 +13,7 @@ HEARTBEAT_INTERVAL_S = 60.0
 
 # Discovery: Tesserae watches tesserae/+/status and uses this to pre-fill the
 # device kind in its one-click register flow.
-CLIENT_KIND = "pi_png_client"
+KIND = "pi_png_client"
 
 
 def status_topic(device_id: str) -> str:
@@ -59,11 +59,11 @@ class Status:
     last_digest: str | None = None
     panel: str = "unknown"
     started_at: float = field(default_factory=time.time)
-    kind: str = CLIENT_KIND
+    kind: str = KIND
     panel_w: int = 0
     panel_h: int = 0
     fw_version: str = field(default_factory=_fw_version)
-    ip: str = field(default_factory=_primary_ip)
+    ip: str = ""
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -160,8 +160,8 @@ def status_summary(status: Status) -> str:
 
 
 __all__ = [
-    "CLIENT_KIND",
     "HEARTBEAT_INTERVAL_S",
+    "KIND",
     "OFFLINE_WILL_PAYLOAD",
     "Heartbeat",
     "Publisher",
