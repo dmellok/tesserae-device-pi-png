@@ -1,4 +1,4 @@
-# tesserae-pi-png-client
+# tesserae-device-pi-png
 
 Raspberry Pi-side daemon that talks to a [Tesserae](https://github.com/dmellok/tesserae)
 server — either by **polling the REST API** (default for fresh installs) or by
@@ -8,7 +8,7 @@ e-ink panel via the official [`inky`](https://github.com/pimoroni/inky)
 library.
 
 This is the **PNG path** counterpart to
-[`tesserae-pi-bin-client`](https://github.com/dmellok/tesserae-pi-bin-client).
+[`tesserae-device-pi-bin`](https://github.com/dmellok/tesserae-device-pi-bin).
 Most installs only need ONE of the two.
 
 | | tesserae-pi-bin-client | tesserae-pi-png-client (this) |
@@ -31,8 +31,8 @@ Pick the **png** client if any of the following is true:
 ### One-shot (recommended)
 
 ```bash
-git clone https://github.com/dmellok/tesserae-pi-png-client
-cd tesserae-pi-png-client
+git clone https://github.com/dmellok/tesserae-device-pi-png.git
+cd tesserae-device-pi-png
 ./scripts/install.sh
 ```
 
@@ -80,8 +80,8 @@ echo 'dtoverlay=spi0-0cs' | sudo tee -a /boot/firmware/config.txt
 sudo usermod -aG gpio,spi "$USER"          # log out + back in after this
 # reboot so SPI + I2C + the overlay take effect before first run
 
-git clone https://github.com/dmellok/tesserae-pi-png-client
-cd tesserae-pi-png-client
+git clone https://github.com/dmellok/tesserae-device-pi-png.git
+cd tesserae-device-pi-png
 python3 -m venv .venv
 .venv/bin/pip install -e .                 # pulls inky[rpi]
 # Pi 5 / Bookworm only:
