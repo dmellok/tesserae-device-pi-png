@@ -1,7 +1,8 @@
 # tesserae-pi-png-client
 
-Raspberry Pi-side daemon that subscribes to a [Tesserae](https://github.com/dmellok/tesserae)
-server over MQTT, downloads PNG frames, applies the message's
+Raspberry Pi-side daemon that talks to a [Tesserae](https://github.com/dmellok/tesserae)
+server — either by **polling the REST API** (default for fresh installs) or by
+**subscribing to an MQTT broker** — downloads PNG frames, applies the server's
 rotate / scale / bg / saturation hints, and paints them onto a Pimoroni
 e-ink panel via the official [`inky`](https://github.com/pimoroni/inky)
 library.
@@ -45,9 +46,11 @@ It does, idempotently:
 3. `usermod -aG gpio,spi $USER` for HAT access (needs a re-login to take effect)
 4. Create `.venv` in the repo dir
 5. `pip install -e .` — pulls `inky[rpi]`, `paho-mqtt`, `Pillow`
-6. Prompt for device id + MQTT host/port/user/pass/client-id → write
-   `~/.config/tesserae-pi-png-client/config.toml` (skipped if it exists, unless
-   `--reconfigure`)
+6. **Prompts** for transport (`rest` default — just the Tesserae server URL
+   — or `mqtt` for an existing broker setup), device id, and the
+   transport-specific fields, then writes
+   `~/.config/tesserae-pi-png-client/config.toml` (skipped if it exists,
+   unless `--reconfigure`)
 7. Symlink `.venv/bin/tesserae-pi-png-client` to `/usr/local/bin/`
 8. Install + enable + start the systemd service (skip with `--no-service`)
 
@@ -101,17 +104,27 @@ section below is for you.
 ### Configure
 
 The first run writes `~/.config/tesserae-pi-png-client/config.toml` with
-sensible defaults. Edit `mqtt.host` to point at your broker, then re-run:
+sensible defaults. For REST mode (the new default) point `rest.server_url`
+at the Tesserae server; for MQTT mode point `mqtt.host` at your broker:
 
 ```toml
+transport_mode = "rest"  # mqtt | rest
+
 [mqtt]
 host = "192.168.1.10"
 port = 1883
 username = ""
 password = ""
 client_id = "pi-impression-png-1"
-device_id = "pi_png"  # MQTT topic prefix
+device_id = "pi_png"  # MQTT topic prefix (also identifies this device to REST)
 keepalive = 60
+
+[rest]
+server_url = "http://tesserae.local:8765"
+device_token = ""         # auto-populated after pair/discover
+pairing_code = ""         # single-use; wiped after first successful register
+last_frame_etag = ""      # auto-populated for If-None-Match short-circuit
+poll_interval_s = 60      # fallback wake interval if server omits next_poll_s
 
 [http]
 download_timeout_s = 30
@@ -121,25 +134,30 @@ max_frame_bytes = 16_000_000
 level = "INFO"
 ```
 
-`device_id` sets the MQTT topic prefix this client subscribes and publishes
-on (see *MQTT contract* below), and is the id Tesserae identifies the device
-by. The default `pi_png` matches Tesserae's built-in `pi_png_client` device
-kind. Give each Pi its own id (`pi_lounge`, `pi_kitchen`, …) if you run more
-than one. It must be lowercase, 2–32 chars, and start with a letter
+`device_id` identifies this Pi to Tesserae and (in MQTT mode) sets the
+topic prefix `tesserae/<device_id>/...`. The default `pi_png` matches the
+server's built-in `pi_png_client` kind. Give each Pi its own id
+(`pi_png_lounge`, `pi_png_kitchen`, …) if you run more than one. It must
+be lowercase, 2–32 chars, and start with a letter
 (`^[a-z][a-z0-9_-]{1,31}$`).
 
 Note: there is no `[panel]` section — the panel is auto-detected from the
 HAT EEPROM. If detection fails the daemon refuses to start (see
 troubleshooting).
 
-> **Upgrading from an older version?** This client used to hardcode the
-> `tesserae/pi/...` topic prefix. It now defaults to `tesserae/pi_png/...`.
-> **This is a breaking topic change**: an existing `config.toml` with no
-> `device_id` parses with the new `pi_png` default, so the client moves to
-> the new topics. Either register a `pi_png` device in Tesserae
-> (Settings → Devices — the built-in `pi_png_client` kind), or, to keep the
-> legacy prefix, set `device_id = "pi"` by hand and add a matching device in
-> Tesserae.
+> **Upgrading?** Two breakage windows to be aware of:
+>
+> - **Pre-`device_id` configs** (very early installs) had no `device_id`
+>   key and hardcoded `tesserae/pi/...`. Those now resolve to `pi_png`
+>   on parse, moving you to `tesserae/pi_png/...` — register a `pi_png`
+>   device in Tesserae or set `device_id = "pi"` to keep the legacy
+>   prefix.
+> - **Pre-REST configs** (no `transport_mode` key) keep defaulting to
+>   `transport_mode = "mqtt"` via the parser fallback, so a
+>   `git pull && systemctl restart` does **not** switch you to REST.
+>   Only freshly written configs (and the install prompt) default to
+>   REST. To switch an existing install, add `transport_mode = "rest"`
+>   at the top of `config.toml` and fill in `[rest].server_url`.
 
 ### Install as a service (if you used the manual path)
 
@@ -154,10 +172,66 @@ The unit runs as your user with `gpio` + `spi` group membership.
 
 ---
 
+## Transports
+
+The client speaks one of two transports, selected by `transport_mode`:
+
+- **`rest`** (default for fresh installs) — polls the Tesserae server's
+  `/api/v1/` directly. No broker needed; one round-trip per wake cycle
+  (`GET /frame` + `POST /status`). Out of the box the wake cadence is
+  **every 60 s**; the server's `/status` response can push a different
+  `next_poll_s` per cycle or a durable `config.sleep_interval_s`, both
+  clamped to `[30s, 7d]`.
+- **`mqtt`** — subscribes to a broker and reacts to retained frame
+  announcements. Stays connected; pushes are near-instant. Requires a
+  broker on the LAN.
+
+The installer prompts for transport at the top and only asks for the
+relevant fields (REST → server URL + optional pairing code; MQTT →
+broker host/port/credentials/client id).
+
+Switching mode later is a config-file edit + `sudo systemctl restart
+tesserae-pi-png-client`. **Existing `config.toml` files** without
+`transport_mode` continue to default to **`mqtt`** (no surprise mode
+switch on upgrade); only fresh installs get the new REST default.
+
+### REST mode setup (default install)
+
+When the installer asks for transport, hit Enter to accept `rest`,
+then either:
+
+1. **Recommended path (zero typing on the device):** start the daemon
+   with no pairing code and click **Register** on the discovered row in
+   the server's Settings → Devices page. The daemon's next
+   `POST /device/discover` claims the token by MAC match; you'll see
+   "registered via discover" in the journal.
+2. **Strict path (per-device admin approval):** generate a 6-digit
+   pairing code in Settings → Devices and enter it at the installer's
+   pairing-code prompt. The code is single-use; after a successful
+   register the daemon wipes it and saves the issued `device_token`.
+
+To re-pair after the fact (e.g. token was revoked, or the local
+`device_token` got wiped), generate a fresh code and run once with the
+CLI override:
+
+```bash
+tesserae-pi-png-client --pair 123456
+```
+
+`--pair` overrides whatever is in `[rest].pairing_code` for that run
+only and is no-op'd if a `device_token` is already saved.
+
+If a 401 ever comes back from the server (token revoked or wiped from
+the server side), the daemon clears the local `device_token` and exits.
+Restart with `--pair` or rely on the discover loop to recover.
+
+---
+
 ## MQTT contract
 
-All topics are prefixed with the configured `device_id` (default `pi_png`),
-i.e. `tesserae/<device_id>/...`. The examples below use the default.
+Active when `transport_mode = "mqtt"`. All topics are prefixed with the
+configured `device_id` (default `pi_png`), i.e. `tesserae/<device_id>/...`.
+The examples below use the default.
 
 ### Subscribe
 
@@ -215,6 +289,64 @@ primary interface can't be determined.
 
 ---
 
+## REST contract
+
+Active when `transport_mode = "rest"`. All endpoints sit under `/api/v1/`
+on the configured `server_url`. The client sends both `Authorization:
+Bearer <token>` and `X-Tesserae-Token: <token>` on every authenticated
+call (cheap belt-and-suspenders against header-stripping middleboxes).
+
+### First boot — `POST /device/discover`
+
+Body: `{device_id, kind: "pi_png_client", panel_w, panel_h, fw_version, mac}`.
+
+The server responds in one of two shapes:
+
+- `{registered: false, retry_after_s: 30}` — the device shows up in
+  Settings → Devices "Discovered" strip; sleep `retry_after_s` and poll
+  again.
+- `{registered: true, device_token, device_id, server_time}` — admin
+  clicked Register; persist the token, **adopt `device_id` from the
+  response** (it may differ from what was sent — using the wrong one
+  gives 403 on subsequent calls), then enter the wake loop.
+
+### Alternative first boot — `POST /device/register`
+
+Header: `X-Pairing-Code: <6-digit-code>`, body same as discover.
+Returns `201 + {device_token, device_id, reused_existing}` on success;
+`403` on bad/expired code (process exits — generate a fresh code);
+`429 + Retry-After` if rate-limited.
+
+### Wake loop — `GET /device/<id>/frame`
+
+Header: `Authorization: Bearer <token>`, optional `If-None-Match:
+<last_frame_etag>`.
+
+- `200` + JSON `{url, format: "png", render_id, rotate, scale, bg,
+  saturation, panel_w, panel_h}` and `ETag: "<sha256>"` — download `url`,
+  apply the rotate/scale/bg transforms, paint with `saturation`, save the
+  new ETag. The `rotate/scale/bg/saturation` fields use the same vocabulary
+  as the MQTT payload.
+- `304` — composition unchanged; skip download + paint.
+- `204` — server hasn't rendered anything for this device yet.
+- `401` — token invalid; the daemon wipes `device_token` from
+  `config.toml` and exits.
+- `403` — token doesn't match the device id (likely a stale local id);
+  exits without wiping the token. Re-pair to refresh.
+
+### Wake loop — `POST /device/<id>/status`
+
+Body: the same heartbeat shape as the MQTT retained
+`tesserae/<device_id>/status` payload (`{state, last_paint_at, last_error,
+last_digest, uptime_s, fw_version, panel, kind, panel_w, panel_h, ip}`).
+
+Response: `{status, config: {sleep_interval_s?}, next_poll_s?,
+server_time}`. `config.sleep_interval_s` is durable (persisted to
+`[rest].poll_interval_s` for future cycles), `next_poll_s` is one-shot
+(only the next sleep duration). Both clamp to `[30s, 7d]`.
+
+---
+
 ## Transform pipeline
 
 For each arriving frame:
@@ -265,6 +397,27 @@ For each arriving frame:
   check firewall, port, and that the server is actually serving on the
   URL the message advertised.
 
+**REST: `not registered yet — admin needs to click Register on the server` loops forever**
+- The daemon's `POST /device/discover` is reaching the server, but no one
+  has clicked Register in Settings → Devices. Either click it (the next
+  discover poll claims the token) or mint a 6-digit pairing code and rerun
+  with `--pair <code>` for the strict path.
+
+**REST: `frame GET 401: token invalid`**
+- The server revoked the device or the local `device_token` is corrupt.
+  The daemon wipes it from `config.toml` and exits — re-pair (`--pair`)
+  or wait for the discover loop to re-claim.
+
+**REST: `frame GET 403: token not valid for this device`**
+- The local `[mqtt].device_id` no longer matches the server's canonical
+  id (admin renamed the device). The discover-claim flow normally adopts
+  the new id; if you got here, re-pair to refresh both id and token.
+
+**REST: log shows `server_time skew=...s; check NTP`**
+- The Pi's clock has drifted more than a minute from the server's. We
+  don't `settimeofday` (NTP owns that on Linux); check that
+  `chronyd`/`systemd-timesyncd` is running.
+
 **Colours look washed out / oversaturated**
 - Tune the `saturation` field on the Tesserae server side. The Pi just
   passes whatever value arrives straight to `inky.set_image()`.
@@ -290,12 +443,15 @@ imports it so the unit tests run on any host.
 
 ```
 src/tesserae_pi_png_client/
-  transforms.py    # pure rotate/scale/bg — fully tested
-  config.py        # TOML load + defaults
-  paint.py         # inky wrapper (lazy-imported)
-  mqtt_loop.py     # paho client + frame dispatcher
-  heartbeat.py     # retained status + LWT
-  main.py          # CLI entry point, signal handlers
+  transforms.py        # pure rotate/scale/bg — fully tested
+  config.py            # TOML load + atomic save + transport_mode/[rest]
+  paint.py             # inky wrapper (lazy-imported)
+  mqtt_loop.py         # paho client + frame dispatcher
+  heartbeat.py         # retained status + LWT
+  transports/
+    mqtt.py            # MQTT wake loop (extracted from main)
+    rest.py            # REST polling loop + discover/register/pair
+  main.py              # CLI entry point, signal handlers, transport dispatch
 ```
 
 License: AGPL-3.0-or-later.
