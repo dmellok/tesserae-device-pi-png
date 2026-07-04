@@ -43,7 +43,8 @@ It does, idempotently:
 1. `apt-get install` the build prereqs (`python3-dev`, `build-essential`,
    `libopenjp2-7`, `libtiff6`)
 2. `raspi-config nonint do_spi 0` to enable SPI
-3. `usermod -aG gpio,spi $USER` for HAT access (needs a re-login to take effect)
+3. `usermod -aG gpio,spi,i2c $USER` for HAT access (i2c is needed for the
+   HAT EEPROM read on Inky Impression; needs a re-login to take effect)
 4. Create `.venv` in the repo dir
 5. `pip install -e .` — pulls `inky[rpi]`, `paho-mqtt`, `Pillow`
 6. **Prompts** for transport (`rest` default — just the Tesserae server URL
@@ -77,7 +78,7 @@ sudo raspi-config nonint do_spi 0          # pixel data to the panel
 sudo raspi-config nonint do_i2c 0          # HAT EEPROM read by auto-detect
 # free the CS pin so inky can drive chip-select in software:
 echo 'dtoverlay=spi0-0cs' | sudo tee -a /boot/firmware/config.txt
-sudo usermod -aG gpio,spi "$USER"          # log out + back in after this
+sudo usermod -aG gpio,spi,i2c "$USER"      # i2c for HAT EEPROM read; log out + back in
 # reboot so SPI + I2C + the overlay take effect before first run
 
 git clone https://github.com/dmellok/tesserae-device-pi-png.git
@@ -168,7 +169,8 @@ sudo ./scripts/install-service.sh        # uses $SUDO_USER by default
 sudo journalctl -fu tesserae-pi-png-client
 ```
 
-The unit runs as your user with `gpio` + `spi` group membership.
+The unit runs as your user with `gpio` + `spi` + `i2c` group membership
+(`i2c` is required so `inky.auto()` can read the HAT EEPROM at startup).
 
 ---
 
@@ -371,7 +373,8 @@ For each arriving frame:
   `sudo raspi-config nonint do_spi 0 && sudo raspi-config nonint do_i2c 0`
 - **reboot**, then confirm the EEPROM is visible:
   `ls /dev/i2c-1 && sudo i2cdetect -y 1` (expect `50` in the grid)
-- check your user is in `gpio` and `spi` groups: `groups`
+- check your user is in `gpio`, `spi`, and `i2c` groups: `groups`
+  (`i2c` is needed for the EEPROM read, not just the SPI pixel path)
 - if `i2cdetect` shows no `50`, the board has no readable EEPROM (some
   Impression/Spectra units, all non-genuine boards) and auto-detect can't
   identify it
