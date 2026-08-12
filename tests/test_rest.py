@@ -15,6 +15,7 @@ import requests
 from PIL.Image import Image
 from PIL.Image import new as new_image
 
+from tesserae_pi_png_client.button_report import ButtonReport
 from tesserae_pi_png_client.config import (
     Config,
     HttpConfig,
@@ -117,6 +118,7 @@ class FakeSession:
         self,
         url: str,
         headers: dict[str, str] | None = None,
+        params: dict[str, str] | None = None,
         timeout: float | None = None,
         allow_redirects: bool = True,
         stream: bool = False,
@@ -126,6 +128,9 @@ class FakeSession:
                 "method": "GET",
                 "url": url,
                 "headers": dict(headers or {}),
+                # Queued by URL alone, so a button press changes `params`
+                # without changing the key a test queues against.
+                "params": dict(params or {}),
                 "timeout": timeout,
                 "allow_redirects": allow_redirects,
                 "stream": stream,
@@ -172,6 +177,7 @@ def _config(
     pairing_code: str = "",
     last_frame_etag: str = "",
     poll_interval_s: int = 60,
+    tz: str = "",
 ) -> Config:
     return Config(
         mqtt=MqttConfig(
@@ -187,6 +193,7 @@ def _config(
             pairing_code=pairing_code,
             last_frame_etag=last_frame_etag,
             poll_interval_s=poll_interval_s,
+            tz=tz,
         ),
     )
 
@@ -609,3 +616,409 @@ def test_run_aborts_without_server_url(tmp_path: Path) -> None:
     )
     rc = rest.run(cfg, _status(), lambda i, s: None, threading.Event(), tmp_path / "x.toml")
     assert rc == 2
+
+
+# --- button delivery through the wake cycle -----------------------------------
+
+
+def _paint_noop(img: Image, saturation: float) -> None:
+    del img, saturation
+
+
+def test_button_press_rides_the_frame_query(tmp_path: Path) -> None:
+    cfg = _config(device_token="TOK")
+    cfg_path = tmp_path / "config.toml"
+    save_config(cfg, cfg_path)
+
+    session = FakeSession()
+    session.queue("GET", f"{BASE}/device/pi_png/frame", FakeResponse(304))
+    session.queue("POST", f"{BASE}/device/pi_png/status", FakeResponse(200, {}))
+    client = RestClient(SERVER_URL, session=session)  # type: ignore[arg-type]
+
+    report = ButtonReport(seed=77)
+    report.set("refresh")
+
+    _wake_cycle(client, cfg, _status(), _paint_noop, cfg_path, report)
+
+    assert session.calls[0]["params"] == {
+        "button": "refresh",
+        "button_event_id": "77",
+    }
+    # 304 acknowledged it, so /status must NOT carry it too.
+    status_body = json.loads(session.calls[1]["data"])
+    assert "button" not in status_body
+    assert report.pending() is None
+
+
+def test_unacknowledged_frame_falls_back_to_status_delivery(tmp_path: Path) -> None:
+    """A 500 on the frame GET does not prove dispatch — /status delivers it."""
+    cfg = _config(device_token="TOK")
+    cfg_path = tmp_path / "config.toml"
+    save_config(cfg, cfg_path)
+
+    session = FakeSession()
+    session.queue("GET", f"{BASE}/device/pi_png/frame", FakeResponse(500))
+    client = RestClient(SERVER_URL, session=session)  # type: ignore[arg-type]
+
+    report = ButtonReport(seed=5)
+    report.set("left")
+    _wake_cycle(client, cfg, _status(), _paint_noop, cfg_path, report)
+
+    # The 500 path returns before /status, so the press is still pending.
+    assert report.status_fields() == {"button": "left", "button_event_id": 5}
+
+
+def test_status_fallback_body_carries_the_press(tmp_path: Path) -> None:
+    cfg = _config(device_token="TOK")
+    cfg_path = tmp_path / "config.toml"
+    save_config(cfg, cfg_path)
+
+    session = FakeSession()
+    # A 404 is not an acknowledgement, but the cycle still reaches /status —
+    # which is the fallback delivery path.
+    session.queue("GET", f"{BASE}/device/pi_png/frame", FakeResponse(404))
+    session.queue("POST", f"{BASE}/device/pi_png/status", FakeResponse(200, {}))
+    client = RestClient(SERVER_URL, session=session)  # type: ignore[arg-type]
+
+    report = ButtonReport(seed=9)
+    report.set("right")
+    _wake_cycle(client, cfg, _status(), _paint_noop, cfg_path, report)
+
+    status_body = json.loads(session.calls[1]["data"])
+    assert status_body["button"] == "right"
+    assert status_body["button_event_id"] == 9
+    # Delivered; it must not re-fire on the next cycle.
+    assert report.pending() is None
+
+
+def test_no_press_sends_no_button_fields(tmp_path: Path) -> None:
+    cfg = _config(device_token="TOK")
+    cfg_path = tmp_path / "config.toml"
+    save_config(cfg, cfg_path)
+
+    session = FakeSession()
+    session.queue("GET", f"{BASE}/device/pi_png/frame", FakeResponse(304))
+    session.queue("POST", f"{BASE}/device/pi_png/status", FakeResponse(200, {}))
+    client = RestClient(SERVER_URL, session=session)  # type: ignore[arg-type]
+
+    _wake_cycle(client, cfg, _status(), _paint_noop, cfg_path)
+
+    assert session.calls[0]["params"] == {}
+    status_body = json.loads(session.calls[1]["data"])
+    assert "button" not in status_body
+    assert "button_event_id" not in status_body
+
+
+# --- Retry-After + tz ---------------------------------------------------------
+
+
+def test_frame_429_honours_retry_after(tmp_path: Path) -> None:
+    cfg = _config(device_token="TOK", poll_interval_s=60)
+    cfg_path = tmp_path / "config.toml"
+    save_config(cfg, cfg_path)
+
+    session = FakeSession()
+    session.queue(
+        "GET",
+        f"{BASE}/device/pi_png/frame",
+        FakeResponse(429, headers={"Retry-After": "300"}),
+    )
+    client = RestClient(SERVER_URL, session=session)  # type: ignore[arg-type]
+
+    _cfg, next_poll, should_exit = _wake_cycle(
+        client, cfg, _status(), _paint_noop, cfg_path
+    )
+    assert not should_exit
+    assert next_poll == 300
+
+
+def test_frame_429_without_header_uses_poll_interval(tmp_path: Path) -> None:
+    cfg = _config(device_token="TOK", poll_interval_s=90)
+    cfg_path = tmp_path / "config.toml"
+    save_config(cfg, cfg_path)
+
+    session = FakeSession()
+    session.queue("GET", f"{BASE}/device/pi_png/frame", FakeResponse(429))
+    client = RestClient(SERVER_URL, session=session)  # type: ignore[arg-type]
+
+    _cfg, next_poll, _exit = _wake_cycle(
+        client, cfg, _status(), _paint_noop, cfg_path
+    )
+    assert next_poll == 90
+
+
+def test_frame_429_retry_after_is_clamped(tmp_path: Path) -> None:
+    """A hostile header must not pin the daemon at sub-second retries."""
+    cfg = _config(device_token="TOK")
+    cfg_path = tmp_path / "config.toml"
+    save_config(cfg, cfg_path)
+
+    session = FakeSession()
+    session.queue(
+        "GET",
+        f"{BASE}/device/pi_png/frame",
+        FakeResponse(429, headers={"Retry-After": "1"}),
+    )
+    client = RestClient(SERVER_URL, session=session)  # type: ignore[arg-type]
+
+    _cfg, next_poll, _exit = _wake_cycle(
+        client, cfg, _status(), _paint_noop, cfg_path
+    )
+    assert next_poll == rest.POLL_INTERVAL_MIN_S
+
+
+def test_status_429_honours_retry_after(tmp_path: Path) -> None:
+    cfg = _config(device_token="TOK", poll_interval_s=60)
+    cfg_path = tmp_path / "config.toml"
+    save_config(cfg, cfg_path)
+
+    session = FakeSession()
+    session.queue("GET", f"{BASE}/device/pi_png/frame", FakeResponse(304))
+    session.queue(
+        "POST",
+        f"{BASE}/device/pi_png/status",
+        FakeResponse(429, headers={"Retry-After": "240"}),
+    )
+    client = RestClient(SERVER_URL, session=session)  # type: ignore[arg-type]
+
+    _cfg, next_poll, should_exit = _wake_cycle(
+        client, cfg, _status(), _paint_noop, cfg_path
+    )
+    assert not should_exit
+    assert next_poll == 240
+
+
+def test_status_adopts_and_persists_tz(tmp_path: Path) -> None:
+    cfg = _config(device_token="TOK")
+    cfg_path = tmp_path / "config.toml"
+    save_config(cfg, cfg_path)
+
+    new_cfg, _next = _apply_status_response(
+        cfg, {"config": {"tz": "Australia/Melbourne"}}, cfg_path
+    )
+    assert new_cfg.rest.tz == "Australia/Melbourne"
+    assert parse_toml(cfg_path.read_text()).rest.tz == "Australia/Melbourne"
+
+
+def test_top_level_tz_echo_is_not_adopted(tmp_path: Path) -> None:
+    """The response's top-level `tz` is an echo of whichever zone the server
+    resolved — including one we sent. Adopting it would pin the panel to a
+    stale zone the first time the operator changes the server's timezone,
+    because our heartbeat tz overrides theirs."""
+    cfg = _config(device_token="TOK")
+    cfg_path = tmp_path / "config.toml"
+    save_config(cfg, cfg_path)
+
+    new_cfg, _next = _apply_status_response(
+        cfg, {"tz": "Europe/Berlin", "tz_offset_seconds": 7200}, cfg_path
+    )
+    assert new_cfg.rest.tz == ""
+
+
+def test_status_body_reports_tz_and_next_sleep(tmp_path: Path) -> None:
+    cfg = _config(device_token="TOK", poll_interval_s=120, tz="Australia/Perth")
+    cfg_path = tmp_path / "config.toml"
+    save_config(cfg, cfg_path)
+
+    session = FakeSession()
+    session.queue("GET", f"{BASE}/device/pi_png/frame", FakeResponse(304))
+    session.queue("POST", f"{BASE}/device/pi_png/status", FakeResponse(200, {}))
+    client = RestClient(SERVER_URL, session=session)  # type: ignore[arg-type]
+
+    _wake_cycle(client, cfg, _status(), _paint_noop, cfg_path)
+
+    body = json.loads(session.calls[1]["data"])
+    assert body["tz"] == "Australia/Perth"
+    assert body["next_sleep_s"] == 120
+
+
+# --- capability gating --------------------------------------------------------
+
+
+def test_cacheless_status_body_carries_no_cache_keys(tmp_path: Path) -> None:
+    """With no cache the wire body must be byte-identical to a client that
+    never had one — advertising is what makes the server offer the feature."""
+    cfg = _config(device_token="TOK")
+    cfg_path = tmp_path / "config.toml"
+    save_config(cfg, cfg_path)
+
+    session = FakeSession()
+    session.queue("GET", f"{BASE}/device/pi_png/frame", FakeResponse(304))
+    session.queue("POST", f"{BASE}/device/pi_png/status", FakeResponse(200, {}))
+    client = RestClient(SERVER_URL, session=session)  # type: ignore[arg-type]
+
+    _wake_cycle(client, cfg, _status(), _paint_noop, cfg_path)
+
+    body = json.loads(session.calls[1]["data"])
+    for key in ("deck_cache", "frame_cache", "ota", "deck_page_id", "collection"):
+        assert key not in body
+
+
+def test_disabled_cache_advertises_nothing_through_the_cycle(tmp_path: Path) -> None:
+    from tesserae_pi_png_client.cache_sync import CacheManager
+
+    cfg = _config(device_token="TOK")
+    cfg_path = tmp_path / "config.toml"
+    save_config(cfg, cfg_path)
+
+    cache = CacheManager(
+        tmp_path / "cache", "pi_png", max_frame_bytes=1000,
+        download_timeout_s=1.0, panel_size=(600, 448), enabled=False,
+    )
+
+    session = FakeSession()
+    session.queue("GET", f"{BASE}/device/pi_png/frame", FakeResponse(304))
+    session.queue("POST", f"{BASE}/device/pi_png/status", FakeResponse(200, {}))
+    client = RestClient(SERVER_URL, session=session)  # type: ignore[arg-type]
+
+    _wake_cycle(
+        client, cfg, _status(), _paint_noop, cfg_path, ButtonReport(seed=1), cache
+    )
+
+    body = json.loads(session.calls[1]["data"])
+    assert "deck_cache" not in body
+    assert "frame_cache" not in body
+
+
+def test_enabled_cache_advertises_both_capabilities(tmp_path: Path) -> None:
+    from tesserae_pi_png_client.cache_sync import CacheManager
+
+    cfg = _config(device_token="TOK")
+    cfg_path = tmp_path / "config.toml"
+    save_config(cfg, cfg_path)
+
+    cache = CacheManager(
+        tmp_path / "cache", "pi_png", max_frame_bytes=1000,
+        download_timeout_s=1.0, panel_size=(600, 448), enabled=True,
+    )
+
+    session = FakeSession()
+    session.queue("GET", f"{BASE}/device/pi_png/frame", FakeResponse(304))
+    session.queue("POST", f"{BASE}/device/pi_png/status", FakeResponse(200, {}))
+    client = RestClient(SERVER_URL, session=session)  # type: ignore[arg-type]
+
+    _wake_cycle(
+        client, cfg, _status(), _paint_noop, cfg_path, ButtonReport(seed=1), cache
+    )
+
+    body = json.loads(session.calls[1]["data"])
+    assert body["deck_cache"]["schema"] == 1
+    assert body["frame_cache"]["schema"] == 1
+
+
+def test_ota_capability_rides_the_status_body(tmp_path: Path) -> None:
+    """schema alone means idle, and is what makes the server willing to offer
+    an update at all."""
+    cfg = _config(device_token="TOK")
+    cfg_path = tmp_path / "config.toml"
+    save_config(cfg, cfg_path)
+
+    telemetry = rest.Telemetry(cfg, "0.1.0")
+
+    session = FakeSession()
+    session.queue("GET", f"{BASE}/device/pi_png/frame", FakeResponse(304))
+    session.queue("POST", f"{BASE}/device/pi_png/status", FakeResponse(200, {}))
+    client = RestClient(SERVER_URL, session=session)  # type: ignore[arg-type]
+
+    _wake_cycle(
+        client, cfg, _status(), _paint_noop, cfg_path,
+        ButtonReport(seed=1), None, telemetry,
+    )
+
+    body = json.loads(session.calls[1]["data"])
+    assert body["ota"] == {"schema": 1}
+
+
+# --- locally-served deck press -------------------------------------------------
+
+
+def test_locally_served_press_is_not_reported_as_a_button_action(
+    tmp_path: Path,
+) -> None:
+    """The server saw no request, so reporting the press would double-count
+    it. The page report still goes out, so nav state stays truthful."""
+    import io as _io
+
+    from PIL.Image import new as _new_image
+
+    from tesserae_pi_png_client.cache_sync import CacheManager
+    from tesserae_pi_png_client.frame_cache import digest_of
+
+    def _png(color: int) -> bytes:
+        buf = _io.BytesIO()
+        _new_image("RGB", (600, 448), (color, color, color)).save(buf, format="PNG")
+        return buf.getvalue()
+
+    home, nxt = _png(1), _png(2)
+    d_home, d_next = digest_of(home), digest_of(nxt)
+    manifest = json.dumps({
+        "deck_id": "deck1",
+        "version": "v1",
+        "entry_page_id": "home",
+        "pages": [
+            {
+                "page_id": "home", "digest": d_home, "bytes": len(home),
+                "ttl_s": 0,
+                "links": [
+                    {"button": "right", "zone": None, "target_page_id": "next"}
+                ],
+            },
+            {
+                "page_id": "next", "digest": d_next, "bytes": len(nxt),
+                "ttl_s": 0, "links": [],
+            },
+        ],
+    })
+
+    class _DeckClient:
+        def get_deck_manifest(self, device_id: str, token: str) -> tuple[int, str]:
+            return 200, manifest
+
+        def get_collection_manifest(
+            self, device_id: str, token: str
+        ) -> tuple[int, str]:
+            return 204, ""
+
+        def deck_frame_url(self, device_id: str, digest: str) -> str:
+            return f"http://srv/{digest}"
+
+        def absolute(self, url: str) -> str:
+            return url
+
+        def download_authed(
+            self, url: str, token: str, max_bytes: int, timeout_s: float
+        ) -> bytes:
+            return {d_home: home, d_next: nxt}[url.rsplit("/", 1)[-1]]
+
+    cache = CacheManager(
+        tmp_path / "cache", "pi_png", max_frame_bytes=10_000_000,
+        download_timeout_s=1.0, panel_size=(600, 448), enabled=True,
+    )
+    cache.sync_deck(_DeckClient(), "TOK")
+
+    cfg = _config(device_token="TOK")
+    cfg_path = tmp_path / "config.toml"
+    save_config(cfg, cfg_path)
+
+    session = FakeSession()
+    session.queue("GET", f"{BASE}/device/pi_png/frame", FakeResponse(304))
+    session.queue("POST", f"{BASE}/device/pi_png/status", FakeResponse(200, {}))
+    client = RestClient(SERVER_URL, session=session)  # type: ignore[arg-type]
+
+    report = ButtonReport(seed=3)
+    report.set("right")
+    painted: list[Image] = []
+    _wake_cycle(
+        client, cfg, _status(), lambda img, sat: painted.append(img),
+        cfg_path, report, cache,
+    )
+
+    assert len(painted) == 1  # served from disk
+    # The press was consumed, not sent — on either endpoint.
+    assert "button" not in session.calls[0]["params"]
+    status_body = json.loads(session.calls[1]["data"])
+    assert "button" not in status_body
+    # ...but the page it painted IS reported.
+    assert session.calls[0]["params"]["deck_page_id"] == "next"
+    assert status_body["deck_page_id"] == "next"
+    assert status_body["deck_version"] == "v1"

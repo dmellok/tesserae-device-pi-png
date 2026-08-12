@@ -17,9 +17,13 @@ Env vars (all optional — unset means "use the default"):
     T_MQTT_PASSWORD
     T_MQTT_CLIENT_ID
     T_DEVICE_ID          device id (default: pi_png)
+    T_BUTTONS_ENABLED    "1" to arm the front buttons (off by default)
     T_OVERWRITE          "1" to overwrite an existing file; otherwise abort
 
-(Notably no T_PANEL_MODEL — this client auto-detects via the HAT EEPROM.)
+(Notably no T_PANEL_MODEL — this client auto-detects via the HAT EEPROM.
+That is also why there is no T_BUTTONS_PIN_C: the bin client's installer
+derives button C's pin from the panel model it just asked for, whereas here
+the daemon resolves it at runtime from the panel inky.auto() detected.)
 """
 
 from __future__ import annotations
@@ -54,7 +58,7 @@ def main() -> int:
         print(f"config already exists at {target}; leaving it alone", file=sys.stderr)
         return 0
 
-    overrides: dict[str, str | int] = {}
+    overrides: dict[str, str | int | bool] = {}
     for env_name, kw in [
         ("T_TRANSPORT_MODE", "transport_mode"),
         ("T_REST_SERVER_URL", "rest_server_url"),
@@ -71,6 +75,9 @@ def main() -> int:
     port = _env_int("T_MQTT_PORT")
     if port is not None:
         overrides["mqtt_port"] = port
+
+    if os.environ.get("T_BUTTONS_ENABLED") == "1":
+        overrides["buttons_enabled"] = True
 
     body = render_config_toml(**overrides)  # type: ignore[arg-type]
 
