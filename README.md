@@ -48,8 +48,9 @@ It does, idempotently:
 4. Create `.venv` in the repo dir
 5. `pip install -e .` — pulls `inky[rpi]`, `paho-mqtt`, `Pillow`
 6. **Prompts** for transport (`rest` default — just the Tesserae server URL
-   — or `mqtt` for an existing broker setup), device id, and the
-   transport-specific fields, then writes
+   — or `mqtt` for an existing broker setup), device id, the
+   transport-specific fields, and whether to arm the front buttons
+   (off by default), then writes
    `~/.config/tesserae-pi-png-client/config.toml` (skipped if it exists,
    unless `--reconfigure`)
 7. Symlink `.venv/bin/tesserae-pi-png-client` to `/usr/local/bin/`
@@ -126,6 +127,39 @@ device_token = ""         # auto-populated after pair/discover
 pairing_code = ""         # single-use; wiped after first successful register
 last_frame_etag = ""      # auto-populated for If-None-Match short-circuit
 poll_interval_s = 60      # fallback wake interval if server omits next_poll_s
+tz = ""                   # auto-populated from the server's config.tz
+sse_enabled = true        # hold GET /stream for instant repaints
+
+[relay]
+relay_url = "https://relay.tesserae.ink"
+pairing_code = ""    # single-use; from Settings -> Cloud relay
+# install_id / device_id / device_token / frame_key / private_key /
+# last_frame_etag / config_etag are written by the pairing flow.
+poll_interval_s = 60
+
+[buttons]
+enabled = false      # front buttons off by default
+chip = ""            # gpiochip name; empty = autodetect
+pin_a = 5
+pin_b = 6
+pin_c = 0            # 0 = derive from the detected panel (16 or 25)
+pin_d = 24
+action_a = "left"    # refresh | left | right, or "" to unmap
+action_b = "refresh"
+action_c = "right"
+action_d = ""
+debounce_ms = 50
+
+[cache]
+enabled = true       # deck pages + album frames cached locally
+root = ""            # empty = ~/.cache/tesserae-pi-png-client
+
+[ota]
+report_enabled = true
+
+[environment]
+sensor = ""          # "" | sht4x | shtc3
+i2c_bus = 1
 
 [http]
 download_timeout_s = 30
@@ -176,17 +210,19 @@ The unit runs as your user with `gpio` + `spi` + `i2c` group membership
 
 ## Transports
 
-The client speaks one of two transports, selected by `transport_mode`:
+The client speaks one of three transports, selected by `transport_mode`:
 
 - **`rest`** (default for fresh installs) — polls the Tesserae server's
   `/api/v1/` directly. No broker needed; one round-trip per wake cycle
   (`GET /frame` + `POST /status`). Out of the box the wake cadence is
   **every 60 s**; the server's `/status` response can push a different
   `next_poll_s` per cycle or a durable `config.sleep_interval_s`, both
-  clamped to `[30s, 7d]`.
+  clamped to `[30s, 7d]`. With SSE enabled a push cuts that wait short.
 - **`mqtt`** — subscribes to a broker and reacts to retained frame
   announcements. Stays connected; pushes are near-instant. Requires a
   broker on the LAN.
+- **`relay`** — for a panel that can't reach the Tesserae server at all.
+  See [Cloud relay](#cloud-relay-remote-panels) below.
 
 The installer prompts for transport at the top and only asks for the
 relevant fields (REST → server URL + optional pairing code; MQTT →
@@ -340,12 +376,271 @@ Header: `Authorization: Bearer <token>`, optional `If-None-Match:
 
 Body: the same heartbeat shape as the MQTT retained
 `tesserae/<device_id>/status` payload (`{state, last_paint_at, last_error,
-last_digest, uptime_s, fw_version, panel, kind, panel_w, panel_h, ip}`).
+last_digest, uptime_s, fw_version, panel, kind, panel_w, panel_h, ip}`),
+plus, when available, `rssi`, `tz` and `next_sleep_s`. Each optional field is
+**omitted rather than zeroed** when it has no value, so the server can tell
+"not reported" from "reported as none". Battery / wake_reason fields stay
+absent — a mains-powered Pi has neither.
 
-Response: `{status, config: {sleep_interval_s?}, next_poll_s?,
+Response: `{status, config: {sleep_interval_s?, tz?}, next_poll_s?,
 server_time}`. `config.sleep_interval_s` is durable (persisted to
 `[rest].poll_interval_s` for future cycles), `next_poll_s` is one-shot
-(only the next sleep duration). Both clamp to `[30s, 7d]`.
+(only the next sleep duration). Both clamp to `[30s, 7d]`. `config.tz` is
+durable too — persisted to `[rest].tz` and echoed back on every beat.
+
+> The response also carries a **top-level** `tz` (alongside `local_time` /
+> `tz_offset_seconds`). That one is an *echo* of whichever zone the server
+> resolved — including one this client sent — so it is deliberately **not**
+> adopted: a heartbeat `tz` overrides the server's setting, and adopting the
+> echo would pin the panel to a stale zone the first time an operator
+> changes the server's timezone. Only `config.tz` is treated as durable
+> server-owned config.
+
+A `429` on either the frame GET or the status POST honours `Retry-After`
+(numeric seconds only), clamped to the same `[30s, 7d]` range so a bad
+header can't pin the daemon at sub-second retries.
+
+### Push updates — `GET /device/<id>/stream`
+
+Headers: `Authorization: Bearer <token>`, `Accept: text/event-stream`.
+
+The sibling ESP32 firmware gates this behind kiosk mode, because a
+deep-sleeping battery device can't hold a socket open. A mains-powered Pi
+can, which makes this the one firmware feature that fits *better* here: a
+`sync` event cuts the sleep short and the normal frame GET runs immediately,
+so a dashboard edit lands in about a second instead of up to a full poll
+interval.
+
+Only `sync` is acted on. `values` and `patches` drive on-device overlay
+rendering, which needs a partial-refresh panel the Impression doesn't have —
+they're ignored by design.
+
+The stream is strictly an optimisation: polling carries the same
+information, and every failure path (404 from an older server, dropped
+connection, proxy buffering) degrades to plain polling. Reconnects back off
+1→60 s with ±25 % jitter, and 60 s of silence — the server sends a keepalive
+comment every 25 s — forces a reconnect.
+
+**Reverse proxies must not buffer this route.** The server sets
+`X-Accel-Buffering: no`, which nginx honours; Caddy needs
+`flush_interval -1`. If your proxy buffers anyway, set
+`[rest].sse_enabled = false` and the client polls as before.
+
+### Front buttons — `?button=` on the frame GET
+
+The Impression's four front buttons are read over libgpiod (active-low with
+pull-ups, falling edge) and reported to the server, which maps
+`refresh` / `left` / `right` onto refresh / rotate_prev / rotate_next.
+
+Pin numbers differ by model: **A=5, B=6, D=24 on every Impression, but C is
+GPIO 16 on the 4"/5.7"/7.3" and GPIO 25 on the 13.3"** — a difference
+Pimoroni documents in their getting-started guide. This client has no
+configured panel model, so it resolves `pin_c` at runtime from the
+resolution `inky.auto()` reported; the live panel cannot disagree with
+itself. Set `[buttons].pin_c` to a non-zero value to override.
+
+Delivery follows the firmware's discipline so one press produces exactly one
+server event:
+
+1. A press rides the **frame GET** as `?button=<name>&button_event_id=<id>`,
+   so the server dispatches the action *before* composing its response — the
+   frame that comes back already reflects the press.
+2. `200`, `204` **or `304`** all prove the request arrived, so the press is
+   cleared before the status POST. (`304` counts: "nothing changed" is still
+   an acknowledgement.)
+3. Anything else — network error, `429`, `5xx` — retains it, and the status
+   POST delivers `{button, button_event_id}` as the fallback path. The server
+   dedups on the event id, so the double path can't double-fire.
+
+`button_event_id` is seeded randomly at start-up rather than from zero: the
+server dedups against the last id it saw, so a client that restarted and
+replayed `0, 1, 2, …` would have its first presses silently swallowed.
+
+Buttons are off by default. A HAT without them, or a Pi without libgpiod,
+logs a warning and keeps painting frames — failing to read a button is never
+allowed to stop the panel working.
+
+## Local frame cache (decks + offline albums)
+
+Both features are **capability-gated**: the client advertises
+`deck_cache` / `frame_cache` (with the cache filesystem's free space) on
+each heartbeat, and that is what makes the server offer manifests. Turn
+`[cache].enabled` off and the wire body is byte-identical to a client
+that never had a cache.
+
+**Decks.** `GET /device/<id>/deck` returns pages with 16-hex sha256
+digests, byte sizes, TTLs and a button/zone link graph. Frames land in
+`~/.cache/tesserae-pi-png-client/decks/<deck_id>/`, and a button press
+the graph can answer paints straight from disk — no server round trip.
+
+A locally-served press is deliberately **not** reported as a button
+action: the server saw no request, so reporting it would double-count a
+press already resolved on-device. What *is* reported is
+`deck_page_id` + `deck_version`, so the server's navigation state stays
+truthful.
+
+**Albums.** `GET /device/<id>/collection` returns a schema-1 album:
+frames with positions, digests and URLs, plus a playback block
+(`sequential`/`shuffle` × `loop`/`reshuffle`/`once`, and an
+`interval_s` the client clamps to `[60s, 24h]` — e-ink takes seconds to
+refresh and has a rated refresh count). Playback runs from the local
+cache, so the panel keeps cycling photos while the server is down.
+
+A one-off dashboard frame interrupts the album until its **next**
+scheduled deadline, without pushing that deadline further out — else a
+chatty dashboard would starve playback indefinitely.
+
+Every cached frame is verified before it is painted, and the writer
+re-hashes before storing. Any miss, mismatch, corruption or failed decode
+falls back to the network path silently. The cache is an optimisation,
+never a requirement.
+
+Unlike the firmware there is no 32-frame limit; that was an ESP32 memory
+constraint. The server still decides what to mark cacheable from the
+capacity we advertise.
+
+### Verifying a frame without a render payload
+
+This is the one place the two Pi clients genuinely differ. The
+[`.bin` client](https://github.com/dmellok/tesserae-device-pi-bin) paints a
+headerless packed 4-bpp buffer whose length is *exactly*
+`panel_w * panel_h / 2`, so it can reject a bad relay or cache frame with a
+single length comparison. A PNG has no fixed length, so on the paths where
+bytes arrive **without** a trusted `{url, rotate, scale, bg, saturation}`
+announcement — the cache and the relay — `png_frame.py` substitutes three
+structural checks:
+
+1. the **PNG signature**, which catches a proxy error page or a truncated
+   download before the decoder ever sees it;
+2. a **real decode** through PIL with `load()` forced, so corrupt image data
+   fails here rather than halfway through a panel refresh;
+3. the **decoded dimensions against `paint.panel_resolution()`** — the live
+   panel, not the relay's plaintext `X-Tesserae-Panel-*` headers, which the
+   relay could have altered.
+
+The dimension check is exact, matching the strictness of the length check it
+replaces: frames on these paths are pre-rendered for this panel from the
+geometry it self-reported, so a different size means the two ends disagree
+about the hardware. Cached frames are additionally checked against the
+manifest's `bytes` and their content digest, which port unchanged.
+
+The ordinary REST/MQTT frame path does **not** go through this: it carries
+the server's transform hints, and the [transform
+pipeline](#transform-pipeline) is what turns an arbitrary image into a
+panel-sized one.
+
+## Cloud relay (remote panels)
+
+For a panel that lives where the Tesserae server isn't reachable — a
+different house, a phone hotspot, behind CGNAT. Both ends talk
+**outbound** to a small Cloudflare Worker acting as a per-device
+mailbox: home seals each rendered frame and `PUT`s it, this client polls
+and decrypts. Nothing at home is exposed to the internet.
+
+The relay is **zero-knowledge**. At pairing the panel and the home
+instance exchange X25519 *public* keys through it and each derive the
+same AES-256-GCM frame key locally; the key is never transmitted. The
+relay only ever holds ciphertext, two public keys and a token hash.
+
+```
+frame_key = HKDF-SHA256(X25519(priv, their_pub),
+                        info="tesserae-relay-frame-key-v1", L=32)
+sealed    = nonce(12) || AES-256-GCM(frame, frame_key, nonce, aad="")
+```
+
+Setup:
+
+```toml
+transport_mode = "relay"
+```
+
+```sh
+tesserae-pi-png-client --pair CODE   # code from Settings -> Cloud relay
+```
+
+The panel self-reports `model: "pi_png_client"` plus the detected
+`panel_w`/`panel_h` when it pairs, so home renders PNGs at this panel's
+geometry without the operator pre-entering anything.
+
+Unlike REST pairing, the relay code is **persisted** — the rendezvous
+can span restarts by design, since home may take a while to complete the
+exchange. The `POST /v1/pair` happens exactly once (the stored private
+key is the latch): only that route enforces the code's expiry, so
+re-posting later would 404 a code that is still perfectly good for
+polling. Once the frame key is derived the private scalar is wiped.
+
+Two safety rules the implementation holds to:
+
+- **A failed GCM authentication tag is never painted.** It means the
+  mailbox doesn't match this panel's key, and painting it would render
+  whatever an attacker or a corrupted store supplied.
+- **The decrypted payload is verified structurally** — signature, decode,
+  dimensions against the detected panel — rather than against the relay's
+  plaintext `X-Tesserae-*` headers. See [Verifying a frame without a render
+  payload](#verifying-a-frame-without-a-render-payload).
+
+A `401` on any device-token route means the pairing was **revoked**
+(a revoked device's mailbox and token record are deleted, so a freshly
+paired panel with nothing published sees `204`, never `401`). The client
+drops its stored pairing rather than retrying a dead token — and the
+config it writes in that state parses back cleanly, so a restart after
+revocation still starts.
+
+Buttons work differently here: a relay panel's frame GET terminates at
+the relay, so the `?button=` query can't reach home. The press rides the
+**status body** instead, and is repeated on *every* status post of the
+wake — the relay's status slot is latest-only, so an idle beat could
+otherwise overwrite a button-carrying post before home pulls it. Home
+dedups on the event id, so repeating is safe.
+
+The wire contract is `docs/relay/contract.md` in the Tesserae repo, and
+it is authoritative for all three sides. Its golden vectors are pinned
+in [tests/test_relay_crypto.py](tests/test_relay_crypto.py) — a
+derivation that is merely *plausible* round-trips against itself while
+never agreeing with home, and the only field symptom is that frames
+silently never appear.
+
+## OTA state reporting
+
+This client **does not install anything**. What it does is report update
+attempts to the server's Devices UI, using the same `ota` object the
+firmware sends:
+
+```json
+{ "ota": { "schema": 1, "phase": "confirmed", "reason": "ok",
+           "target_fw": "1.6.0", "attempt_id": "a3f19c" } }
+```
+
+`schema` alone means idle, and is the capability advertisement that
+makes the server willing to offer an update at all. Whatever performs
+the update (apt, pip, git, a systemd timer) records progress through
+`OtaReporter`; state is persisted, because the transition worth having —
+`pending_confirm` → `confirmed`/`rolled_back` — spans the restart it is
+waiting on. Set `[ota].report_enabled = false` to stop advertising.
+
+`fw_version` is reported as plain SemVer. A source checkout used to emit
+`0.0.0+unknown`; a PEP 440 local-version segment doesn't parse as SemVer,
+so the server's update comparison rejected it outright.
+
+## Environment telemetry
+
+Optional ambient temperature/humidity from an **SHT4x** or **SHTC3** on
+the HAT's existing I²C bus (already enabled for the HAT EEPROM):
+
+```toml
+[environment]
+sensor = "sht4x"
+```
+
+Reports `temperature_c`, `humidity_pct` and `env_sensor` — the same
+fields the reTerminal E-Series sends. Readings are CRC-checked (a
+marginal I²C bus returns plausible-looking garbage, and a wrong
+temperature is harder to notice than a missing one), and a failed read
+omits the fields rather than interrupting the heartbeat.
+
+The Pi's own CPU temperature is deliberately **not** reported here: the
+server's field means ambient room temperature, and a SoC running 30 °C
+above the room would quietly poison anything plotted from it.
 
 ---
 
@@ -421,6 +716,29 @@ For each arriving frame:
   don't `settimeofday` (NTP owns that on Linux); check that
   `chronyd`/`systemd-timesyncd` is running.
 
+**Relay: `relay pair 403: rejected by the relay`**
+- Most often this is *not* an auth problem. The hosted relay sits behind
+  Cloudflare bot protection, which blocks known-bot user agents before the
+  request reaches the Worker. The client sends a descriptive `User-Agent`
+  for exactly this reason; if you've put a proxy in front that rewrites it
+  to something like `python-requests/2.x`, the 403 comes from the edge.
+
+**Relay: frames never appear, no errors in the journal**
+- Check the journal for `relay frame rejected`. A failed GCM tag means the
+  mailbox doesn't match this panel's frame key — re-pair. A "refusing to
+  paint a frame rendered for different hardware" line means home is
+  rendering at a different size than `--paint-test` reports; re-pair so the
+  panel re-reports its geometry.
+
+**Buttons do nothing**
+- They're off by default: set `[buttons].enabled = true`.
+- Check the journal at startup for a `buttons armed: GPIO5->left, …` line.
+  `could not open GPIO lines` means libgpiod isn't available or the user
+  lacks access; the daemon logs it and keeps painting frames either way.
+- Button C's pin differs by panel and is derived from the detected
+  resolution. If your board is one we haven't catalogued, set
+  `[buttons].pin_c` explicitly (16 on the 4"/5.7"/7.3", 25 on the 13.3").
+
 **Colours look washed out / oversaturated**
 - Tune the `saturation` field on the Tesserae server side. The Pi just
   passes whatever value arrives straight to `inky.set_image()`.
@@ -438,22 +756,36 @@ ruff check src tests
 mypy src
 ```
 
-The `paho-mqtt` and `Pillow` deps install everywhere; `inky[rpi]` is
-Linux-only and won't install on macOS — that's fine, `paint.py` lazy-
-imports it so the unit tests run on any host.
+The `paho-mqtt`, `Pillow`, `requests` and `cryptography` deps install
+everywhere; `inky[rpi]` is Linux-only and won't install on macOS — that's
+fine, `paint.py` lazy-imports it so the unit tests run on any host. `gpiod`
+(buttons) and `smbus2` (ambient sensor) are lazy-imported too and only
+needed on a Pi that has those features turned on.
 
 ### Layout
 
 ```
 src/tesserae_pi_png_client/
   transforms.py        # pure rotate/scale/bg — fully tested
-  config.py            # TOML load + atomic save + transport_mode/[rest]
+  png_frame.py         # signature + decode + geometry checks for payload-less frames
+  config.py            # TOML load + atomic save + transport_mode/[rest]/[relay]/...
   paint.py             # inky wrapper (lazy-imported)
   mqtt_loop.py         # paho client + frame dispatcher
-  heartbeat.py         # retained status + LWT
+  heartbeat.py         # retained status + LWT + rssi/tz/next_sleep_s
+  button_report.py     # exactly-once press delivery (pure logic)
+  buttons.py           # libgpiod watcher (lazy-imported)
+  deck.py              # deck manifest parse + navigation (pure)
+  collection.py        # album manifest parse + playback traversal (pure)
+  frame_cache.py       # content-addressed on-disk store
+  cache_sync.py        # deck/album orchestration over the cache
+  ota_report.py        # OTA lifecycle reporting (report only, never installs)
+  environment.py       # optional SHT4x/SHTC3 ambient telemetry
+  relay_crypto.py      # X25519 + HKDF + AES-GCM, pinned to the contract vectors
   transports/
     mqtt.py            # MQTT wake loop (extracted from main)
     rest.py            # REST polling loop + discover/register/pair
+    relay.py           # cloud-relay pairing + poll loop
+    sse.py             # SSE push channel (optimisation over polling)
   main.py              # CLI entry point, signal handlers, transport dispatch
 ```
 

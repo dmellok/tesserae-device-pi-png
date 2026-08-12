@@ -20,6 +20,9 @@ dependencies = [
     # set_image() is the high-level entry point — no private-API dependency,
     # so we can take a range rather than the exact pin the bin client uses.
     "inky[rpi]>=2.0,<3",
+    # relay_crypto.py: X25519 + HKDF-SHA256 + AES-256-GCM for the cloud-relay
+    # transport, pinned to docs/relay/contract.md's golden vectors.
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]
@@ -54,6 +57,15 @@ module = [
     "tesserae_pi_png_client.heartbeat",
     "tesserae_pi_png_client.mqtt_loop",
     "tesserae_pi_png_client.transports.rest",
+    # Added for firmware parity — same bar as the rest.
+    "tesserae_pi_png_client.button_report",
+    "tesserae_pi_png_client.collection",
+    "tesserae_pi_png_client.deck",
+    "tesserae_pi_png_client.frame_cache",
+    "tesserae_pi_png_client.ota_report",
+    "tesserae_pi_png_client.png_frame",
+    "tesserae_pi_png_client.relay_crypto",
+    "tesserae_pi_png_client.transports.sse",
 ]
 strict = true
 
@@ -62,12 +74,18 @@ strict = true
 module = [
     "tesserae_pi_png_client.paint",
     "tesserae_pi_png_client.main",
+    "tesserae_pi_png_client.buttons",
+    "tesserae_pi_png_client.environment",
     "tesserae_pi_png_client.transports.mqtt",
 ]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["paho.*", "inky.*", "PIL.*", "requests.*"]
+# Imported lazily and only on a Pi; none of them ship stubs.
+module = [
+    "paho.*", "inky.*", "PIL.*", "requests.*",
+    "gpiod.*", "gpiodevice.*", "smbus2.*",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

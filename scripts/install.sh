@@ -305,6 +305,19 @@ collect_config_via_prompts() {
         rest_pairing_code=""
     fi
     echo
+
+    echo "    The Impression's four front buttons can drive the panel:"
+    echo "      A = previous page, B = refresh, C = next page."
+    echo "    Enable only if your HAT has them wired and libgpiod is present;"
+    echo "    frames paint the same either way. Button C's pin differs between"
+    echo "    Impression sizes — the daemon works it out from the panel it"
+    echo "    detects, so there is nothing to enter here."
+    prompt_default buttons_enabled "Enable front buttons? (y/N)" "n"
+    case "${buttons_enabled,,}" in
+        y|yes) buttons_enabled="1" ;;
+        *)     buttons_enabled="" ;;
+    esac
+    echo
 }
 
 write_config() {
@@ -320,6 +333,7 @@ write_config() {
         T_MQTT_PASSWORD="${mqtt_password:-}" \
         T_MQTT_CLIENT_ID="${mqtt_client_id:-}" \
         T_DEVICE_ID="${device_id:-}" \
+        T_BUTTONS_ENABLED="${buttons_enabled:-}" \
         T_OVERWRITE="$1" \
         "$VENV_DIR/bin/python" -m tesserae_pi_png_client.bootstrap_config
 }
