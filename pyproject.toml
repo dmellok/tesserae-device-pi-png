@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tesserae-pi-png-client"
-version = "0.1.0"
+version = "0.1.1"
 description = "Raspberry Pi daemon that subscribes to a Tesserae server over MQTT and paints PNG frames onto a Pimoroni e-ink panel via the inky library."
 readme = "README.md"
 license = { text = "AGPL-3.0-or-later" }

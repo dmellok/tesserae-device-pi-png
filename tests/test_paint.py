@@ -48,6 +48,21 @@ class FakePanel:
 # --- paint() ------------------------------------------------------------------
 
 
+class MonoPanel(FakePanel):
+    """An InkyWHAT / InkyPHAT: ``set_image`` takes the image and nothing else."""
+
+    def set_image(self, image: Any) -> None:  # type: ignore[override]
+        self.set_image_calls.append((image, -1.0))
+
+
+def test_paint_leaves_saturation_out_for_panels_that_do_not_take_it() -> None:
+    panel = MonoPanel(resolution=(400, 300))
+    img = new_image("RGB", (10, 10), (0, 0, 0))
+    paint(panel, img, saturation=0.75)
+    assert panel.set_image_calls == [(img, -1.0)]
+    assert panel.show_calls == 1
+
+
 def test_paint_passes_image_and_saturation_to_set_image() -> None:
     panel = FakePanel()
     img = new_image("RGB", (10, 10), (255, 0, 0))

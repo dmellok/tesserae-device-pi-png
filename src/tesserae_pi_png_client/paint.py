@@ -18,6 +18,7 @@ That means:
 
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Any, Protocol
 
@@ -31,13 +32,13 @@ log = logging.getLogger(__name__)
 # inky.set_image() projects these down to whatever the device supports — the
 # stripe pattern still validates the SPI path even if some bands collapse.
 STRIPE_COLORS: list[tuple[int, int, int]] = [
-    (0, 0, 0),        # black
+    (0, 0, 0),  # black
     (255, 255, 255),  # white
-    (255, 255, 0),    # yellow
-    (255, 128, 0),    # orange
-    (255, 0, 0),      # red
-    (0, 255, 0),      # green
-    (0, 0, 255),      # blue
+    (255, 255, 0),  # yellow
+    (255, 128, 0),  # orange
+    (255, 0, 0),  # red
+    (0, 255, 0),  # green
+    (0, 0, 255),  # blue
 ]
 
 
@@ -109,9 +110,27 @@ def paint(panel: Any, img: Image, saturation: float) -> None:
 
     The image must already be panel-sized and in RGB mode. Transform pipeline
     (in transforms.py) is responsible for both — we do not second-guess here.
+
+    Only the 7-colour Impression classes take ``saturation``; the wHAT and
+    pHAT drivers' ``set_image(image)`` raise ``TypeError`` on the keyword, so
+    they get the image alone.
     """
-    panel.set_image(img, saturation=saturation)
+    if _takes_saturation(panel):
+        panel.set_image(img, saturation=saturation)
+    else:
+        panel.set_image(img)
     panel.show()
+
+
+def _takes_saturation(panel: Any) -> bool:
+    """Whether ``panel.set_image`` accepts a ``saturation`` keyword."""
+    try:
+        params = inspect.signature(panel.set_image).parameters
+    except (TypeError, ValueError):
+        return True  # no signature to read (a C extension): try the keyword
+    return "saturation" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
 
 
 def stripe_test_image(width: int, height: int) -> Image:
