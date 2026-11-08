@@ -1,5 +1,29 @@
 # tesserae-device-pi-png
 
+> [!IMPORTANT]
+> **This client is retired, and this repo is archived.** It is replaced by
+> [**tesserae-device-pi**](https://github.com/dmellok/tesserae-device-pi), one
+> Raspberry Pi client for every Pimoroni Inky panel that does the jobs of both
+> `tesserae-device-pi-png` and `tesserae-device-pi-bin`, and updates itself
+> from the Tesserae server.
+>
+> **Moving a Pi over keeps its pairing.** Install the new client
+> ([instructions](https://github.com/dmellok/tesserae-device-pi#install)):
+>
+> ```bash
+> git clone https://github.com/dmellok/tesserae-device-pi.git
+> cd tesserae-device-pi
+> ./scripts/install.sh
+> ```
+>
+> It copies this client's config (`~/.config/tesserae-pi-png-client/`),
+> keeps the device's id, token and button settings, and disables the
+> `tesserae-pi-png-client` service without deleting it. The device keeps
+> getting the same frames on the server.
+>
+> The rest of this README describes the retired client and is kept for
+> reference.
+
 Raspberry Pi-side daemon that talks to a [Tesserae](https://github.com/dmellok/tesserae)
 server — either by **polling the REST API** (default for fresh installs) or by
 **subscribing to an MQTT broker** — downloads PNG frames, applies the server's
